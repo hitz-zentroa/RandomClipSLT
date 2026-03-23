@@ -1,0 +1,44 @@
+data:
+  hdf5_path: /path/to/the/directory
+  val_hdf5_path: /path/to/the/file.hdf5 # TODO: aldatu zehazteko balidaziokoa how2sign dela, eta hortik hartu patha
+  how2sign:
+    path: /path/to/the/directory
+  captions:
+    path: /path/to/the/directory
+    max_characters: 200
+    max_seconds: 20
+    min_seconds: 0.5
+    langs:
+      - en
+      - es
+  videos:
+    path: /path/to/the/directory
+  keypoints:
+    frame_freq: 2
+    mediapipe_model_complexity: 1
+    use_z: false
+    main_pose_landmarks:
+      include_face: true
+      include_hands: true
+      include_hips: false
+  random_clips:
+    chunk_seconds: 34 # "n=34" from the paper
+    min_duration_seconds: 17 # "m=17" from the paper
+  mt_pairs:
+    - en-es
+model:
+  model_name: google/byt5-small
+  input_dim: 204 # TODO: funtzio bat sortu datu hau konfiguraziotik lortzeko
+  lora: false
+generation:
+  beam_size: 5
+training:
+  max_tokens: 800
+  initial_data_proportions:
+    mt: 0.45
+    caption_clip: 0.55
+    random_clip: 0.0
+  data_proportions:
+    mt: 0.5
+    caption_clip: 0.25
+    random_clip: 0.25
