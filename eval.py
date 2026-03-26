@@ -77,6 +77,11 @@ def main(args, config):
     input_dim = config['model']['input_dim']
     lora = config['model']['lora']
     beam_size = config['generation']['beam_size']
+    h5_path = os.path.join(
+        config['data']['how2sign']['path'],
+        'hdf5',
+        f'{args.split}.h5'
+    )
 
     os.makedirs(args.output_path)
 
@@ -89,7 +94,7 @@ def main(args, config):
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     
-    ref, out = test_how2sign(model, tokenizer, batch_size=64, hdf5_path=args.hdf5_path, num_beams=beam_size, device=device)
+    ref, out = test_how2sign(model, tokenizer, batch_size=64, hdf5_path=h5_path, num_beams=beam_size, device=device)
     
     bleu = BLEU()
     bleu_score = bleu.corpus_score(out, [ref])
@@ -111,7 +116,7 @@ if __name__ == '__main__':
     parser.add_argument('--config-path', type=str, default='configs/config.yaml')
     parser.add_argument('--output-path', type=str, default='outputs/default/')
     parser.add_argument('--checkpoint-path', type=str, required=True)
-    parser.add_argument('--hdf5-path', type=str, required=True)
+    parser.add_argument('--split', type=str, required=True, choices=['val', 'test'])
     args = parser.parse_args()
 
     print(args)
