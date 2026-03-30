@@ -4,15 +4,17 @@ os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 import argparse
 import dataclasses
 import glob
+import shutil
 import torch
 import yaml
 
-from data.data import read_to_datasets, load_mt_datasets, sentence_level_hdf5_to_dataset, PretrainingDataCollator, SentenceLevelCollator
+from data.data import read_to_datasets, load_mt_datasets, sentence_level_hdf5_to_dataset, DataCollator
 from model import CustomByT5Model
 
 from datasets import concatenate_datasets
 from peft import LoraConfig
 from transformers import AutoTokenizer, Seq2SeqTrainingArguments, Seq2SeqTrainer
+from transformers.trainer_utils import get_last_checkpoint
 
 
 
@@ -38,7 +40,7 @@ def main(args, config):
     #os.environ["WANDB_RUN_ID"] = '4q66kpy2'
 
     hdf5_path = config['data']['hdf5_path']
-    val_hdf5_path = config['data']['val_hdf5_path']
+    val_hdf5_path = config['data']['val_hdf5_path'] # TODO: hau aldatzeko dago
     max_characters = config['data']['captions']['max_characters']
     max_seconds = config['data']['captions']['max_seconds']
     min_seconds = config['data']['captions']['min_seconds']
@@ -49,6 +51,7 @@ def main(args, config):
     model_name = config['model']['model_name']
     input_dim = config['model']['input_dim']
     lora = config['model']['lora']
+    save_path = config['model']['save_path']
     max_tokens = config['training']['max_tokens']
     initial_data_proportions = config['training']['initial_data_proportions']
     proportions = config['training']['data_proportions']
@@ -59,6 +62,7 @@ def main(args, config):
     print(f"Found {len(data_paths)} HDF5 data files for sign languages: {', '.join(sign_langs)}")
     print('Creating SLT datasets...')
 
+    # TODO: dev hemendik kendu
     (
         train_caption_real,
         dev_caption_real,
@@ -83,16 +87,22 @@ def main(args, config):
     print(f'train_random_real: {len(train_random_real)} instances')
     print(f'dev_random_real: {len(dev_random_real)} instances')
 
-    # val_dataset = sentence_level_hdf5_to_dataset(val_hdf5_path) TODO
-    # print(f'Validation dataset loaded from {val_hdf5_path} with {len(val_dataset)} instances.')
+    # TODO: config-etik hartu zein izango den dataseta eta hortik hartu ezaugarriak
+    val_dataset = sentence_level_hdf5_to_dataset(
+        val_hdf5_path, 
+        dataset_name='how2sign_val', 
+        src_lang='ase', 
+        tgt_lang='en'
+    )
+    data_paths_dict['how2sign_val'] = val_hdf5_path
+    print(f'Validation dataset loaded from {val_hdf5_path} with {len(val_dataset)} instances.')
 
     print('Creating MT datasets...')
-
     
     mt_ds, reverse_mt_ds = load_mt_datasets(config['data']['mt_pairs'], max_characters=max_characters)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    collator = PretrainingDataCollator(
+    collator = DataCollator(
         data_paths_dict, 
         tokenizer, 
         input_dim, 
@@ -142,17 +152,16 @@ def main(args, config):
     else:
         lora_config = None
 
-    model = CustomByT5Model(model_name=model_name, input_dim=input_dim, lora_config=lora_config)
-    # model = CustomByT5Model(model_name=model_name, input_dim=input_dim, lora_config=lora_config, load_weights=False) # 2. fasea egiteko
-    # TODO: gero hau ez litzateke beharrezkoa izango ez delako aparte beste exekuzio batean joango (?)
-    # model.load_state_dict(torch.load('/gscratch5/users/balkain001/TRAIN/byt5/pretrain_asl_2/checkpoint-300000/pytorch_model.bin'))
+    load_weights = not args.resume and not args.only_second
+    
+    model = CustomByT5Model(model_name=model_name, input_dim=input_dim, lora_config=lora_config, load_weights=load_weights)
 
     training_args = Seq2SeqTrainingArguments(
-        output_dir=os.path.join('/gscratch5/users/balkain001/TRAIN/byt5', args.run_name),
+        os.path.join(save_path, args.run_name),
         logging_steps=100,
         max_steps=300_000,
         per_device_train_batch_size=16, # 8rekin lehen 53.100. pausoan out of memory
-        per_device_eval_batch_size=16,
+        per_device_eval_batch_size=64,
         learning_rate=1e-3, # hasierako esperimentuetan 2e-5
         optim='adafactor',
         warmup_steps=1000,
@@ -165,8 +174,7 @@ def main(args, config):
         eval_steps=5000,
         save_steps=5000,
         save_total_limit=2, # bestela bukaeran azkena borratzen du
-        load_best_model_at_end=True,
-        metric_for_best_model='eval_caption_loss',
+        metric_for_best_model='eval_loss', # 'eval_caption_loss',
         #report_to='wandb', # jarri gabe ere egiten du
         run_name=args.run_name,
         #prediction_loss_only=True,
@@ -177,53 +185,47 @@ def main(args, config):
         dataloader_num_workers=16
     ) # beste batzuk zeuden hemen: https://medium.com/@anyuanay/fine-tuning-the-pre-trained-t5-small-model-in-hugging-face-for-text-summarization-3d48eb3c4360
 
-    initial_training_args = dataclasses.replace(
-        training_args,
-        per_device_train_batch_size=32,
-        per_device_eval_batch_size=64,
-        max_steps=300_000, #100_000,
-        metric_for_best_model='eval_loss',
-        load_best_model_at_end=False
+    if not args.only_second:
+
+        initial_training_args = dataclasses.replace(
+            training_args,
+            output_dir=os.path.join(save_path, args.run_name+'_initial'),
+            per_device_train_batch_size=32,
+            per_device_eval_batch_size=64,
+            max_steps=300_000, #100_000,
+            # metric_for_best_model='eval_loss',
+        )
+
+        initial_trainer = Seq2SeqTrainer(
+            model=model,
+            args=initial_training_args,
+            train_dataset=initial_train,
+            eval_dataset=val_dataset, #dev_caption_real,
+            data_collator=collator
     )
 
-    initial_trainer = Seq2SeqTrainer(
-        model=model,
-        args=initial_training_args,
-        train_dataset=initial_train,
-        eval_dataset=dev_caption_real, # TODO: val_dataset
-        data_collator=collator
-    )
+        initial_trainer.train(resume_from_checkpoint=args.resume)
 
-    initial_trainer.train()
-    #initial_trainer.train(resume_from_checkpoint=True)
+        shutil.copytree(
+            src=os.path.join(save_path, args.run_name),
+            dst=os.path.join(save_path, f'{args.run_name}_initial')
+        )
+
+    if args.only_second and not args.resume:
+        last_checkpoint = get_last_checkpoint(os.path.join(save_path, args.run_name+'_initial'))
+        model.load_state_dict(torch.load(os.path.join(last_checkpoint, 'pytorch_model.bin')))
+
+    if not args.only_initial:
     
-    trainer = Seq2SeqTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train,
-        eval_dataset=val_dataset, #{'caption': dev_caption_real, 'random': dev_random_real},
-        data_collator=collator
-    )
+        trainer = Seq2SeqTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=train,
+            eval_dataset=val_dataset, #{'caption': dev_caption_real, 'random': dev_random_real},
+            data_collator=collator
+        )
 
-    # trainer.train(resume_from_checkpoint=True)
-    # trainer.train()
-    
-    
-    # Modeloa probatzeko (gero beste nonbaitera eraman):
-
-    #model.load_state_dict(torch.load('./results/checkpoint-1000/pytorch_model.bin'))
-
-    #eval_metrics = trainer.evaluate()
-    #print('eval_metrics:', eval_metrics)
-
-    # predictions = trainer.predict(dev_dataset)
-    # for sentence_pred in predictions.predictions:
-    #     print(sentence_pred)
-    #     print(tokenizer.decode(sentence_pred, skip_special_tokens=True))
-        
-    #print(predictions.predictions[:10])
-    #decoded_preds = tokenizer.batch_decode(predictions.predictions, skip_special_tokens=True)
-    #print(decoded_preds)
+        trainer.train(resume_from_checkpoint=args.resume)
     
 
 if __name__ == '__main__':
@@ -231,6 +233,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train a CustomByT5Model.')
     parser.add_argument('--run-name', type=str, required=True)
     parser.add_argument('--config-path', type=str, default='configs/config.yaml')
+    parser.add_argument('--only-initial', action='store_true')
+    parser.add_argument('--only-second', action='store_true')
+    parser.add_argument('--resume', action='store_true')
     args = parser.parse_args()
 
     print(args)

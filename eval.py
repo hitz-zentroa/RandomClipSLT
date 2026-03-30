@@ -88,8 +88,7 @@ def main(args, config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = CustomByT5Model(model_name=model_name, input_dim=input_dim, load_weights=False) # TODO: LoRA
-    checkpoint_path = args.checkpoint_path
-    model.load_state_dict(torch.load(checkpoint_path))
+    model.load_state_dict(torch.load(args.checkpoint_path))
     model.to(device)
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -128,6 +127,7 @@ if __name__ == '__main__':
 
     main(args, config)
 
+# TODO: noizbait probatu
 
 # predictions = trainer.predict(dev_dataset).predictions
 # predictions[predictions == -100] = 0

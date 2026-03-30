@@ -435,8 +435,8 @@ def read_to_datasets(data_paths, frame_freq=2, chunk_seconds=34, max_characters=
 
                 #TODO: momentuz txapuza hau dev multzo bat izateko. Pentsatu datu gehiagorekin balioko duen zerbait
                 #split = 'dev' if id[0] == '1' else 'train' # LSE
-                split = 'dev' if id == '14SjcMwwNhM' or id == '1y8vXjLQWL0' or id == '23tQHcy3VnI' or id == '14diAi-BS40' or id == '--7t6QjMwpY' or id == '--pq96V-6DA' or id == '-0VIwubCjpM' else 'train' # ASL # 14diAi-BS40 EZ DAGO!
-                # split = 'train'
+                # split = 'dev' if id == '14SjcMwwNhM' or id == '1y8vXjLQWL0' or id == '23tQHcy3VnI' or id == '14diAi-BS40' or id == '--7t6QjMwpY' or id == '--pq96V-6DA' or id == '-0VIwubCjpM' else 'train' # ASL # 14diAi-BS40 EZ DAGO!
+                split = 'train'
 
                 for lang, captions_ds in video_group['captions'].items():
 
@@ -525,25 +525,23 @@ def read_to_datasets(data_paths, frame_freq=2, chunk_seconds=34, max_characters=
             Dataset.from_list(dev_random_synthetic))
 
 
-# Kontuz, honek dena memoriara kargatzen du, hobe ez erabiltzea datu askorekin
-def sentence_level_hdf5_to_dataset(data_path):
-    
+def sentence_level_hdf5_to_dataset(data_path, dataset_name, src_lang, tgt_lang):
+
     instances = []
 
     with h5py.File(data_path, 'r') as f:
-        for _, sentence_group in f.items():
+        for sentence_id in f.keys():
+            # These datasets won't be concatenated with others, so the fields in each instance
+            # don't need to be compatible with other instance types.
             instances.append({
-                'instance_type': 'loaded_caption_clip_slt',
-                'tgt_sentence': sentence_group.attrs['sentence'],
-                'src_lang': 'ase', # TODO: aldatu beste nonbaitetik hartzeko
-                'tgt_lang': 'en', # TODO: aldatu beste nonbaitetik hartzeko
-                'pose': sentence_group['processed_keypoints'][:].astype(np.float32)
+                'instance_type': 'sentence_level_dataset_slt',
+                'src_lang': src_lang,
+                'tgt_lang': tgt_lang,
+                'dataset_name': dataset_name,
+                'sentence_id': sentence_id
             })
 
-    ds = Dataset.from_list(instances)
-    ds.set_format(type='torch', columns=['pose'], output_all_columns=True)
-    
-    return ds
+    return Dataset.from_list(instances)
 
 
 def convert_opus_dataset(instance):
@@ -618,46 +616,9 @@ def get_right_edge(next_captions, start_time, end_time):
     if not next_captions:
         return length
     return min(length, next_captions[0]['start_time'] - start_time)
-    
-
-# TODO: ez badut ezertarako erabiltzen, kendu
-class SentenceLevelCollator:
-    def __init__(self, tokenizer, model_input_dim, pose_pad_value=0.0):
-
-        self.tokenizer = tokenizer
-        self.pose_pad_value = pose_pad_value
-        self.model_input_dim = model_input_dim
 
 
-    def __call__(self, batch):
-
-        input_texts = []
-        poses = []
-        target_texts = []
-        
-        for instance in batch:
-
-            input_texts.append(f'slt 1 src:{instance["src_lang"]} tgt:{instance["tgt_lang"]}\n')
-            poses.append(instance['pose'])
-            target_texts.append(instance['tgt_sentence'])
-
-        encoded = self.tokenizer(input_texts, padding=True, return_tensors='pt')
-        input_ids = encoded['input_ids']
-        text_attention_mask = encoded['attention_mask']
-
-        padded_poses = pad_sequence(poses, batch_first=True, padding_value=self.pose_pad_value)
-        pose_attention_mask = (~torch.all(padded_poses == self.pose_pad_value, dim=-1)).long()
-
-        return {
-            'input_ids': input_ids,
-            'text_attention_mask': text_attention_mask,
-            'input_vectors': padded_poses,
-            'vectors_attention_mask': pose_attention_mask,
-            'labels': target_texts
-        }
-
-
-class PretrainingDataCollator:
+class DataCollator:
     def __init__(
         self, 
         data_paths, 
@@ -684,16 +645,21 @@ class PretrainingDataCollator:
         
         if self.files is None:
             self.files = {
-                lang: h5py.File(data_path, 'r')
-                for lang, data_path in self.data_paths.items()
+                file_key: h5py.File(data_path, 'r')
+                for file_key, data_path in self.data_paths.items()
             }
+    
 
+    def _caption_level_input_text(self, src_lang, tgt_lang):
+        return f'slt 1 src:{src_lang} tgt:{tgt_lang}\n'
+    
+    
+    def _process_sentence_level_dataset_slt_instance(self, instance):
 
-    def _process_loaded_caption_clip_slt_instance(self, instance):
-        
-        input_text = f'slt 1 src:{instance["src_lang"]} tgt:{instance["tgt_lang"]}\n'
-        pose = instance['pose']
-        target_text = instance['tgt_sentence']
+        sentence_group = self.files[instance['dataset_name']][instance['sentence_id']]
+        pose = torch.tensor(sentence_group['processed_keypoints'][:], dtype=torch.float32)
+        input_text = self._caption_level_input_text(instance["src_lang"], instance["tgt_lang"])
+        target_text = sentence_group.attrs['sentence']
 
         return input_text, pose, target_text
 
@@ -704,7 +670,7 @@ class PretrainingDataCollator:
         start_frame = instance['start_frame']
         end_frame = instance['end_frame']
         pose = torch.tensor(video_group['processed_keypoints'][start_frame:end_frame], dtype=torch.float32)
-        input_text = f'slt 1 src:{instance["src_lang"]} tgt:{instance["tgt_lang"]}\n'
+        input_text = self._caption_level_input_text(instance["src_lang"], instance["tgt_lang"])
         target_text = instance['tgt_sentence']    
 
         return input_text, pose, target_text
@@ -802,8 +768,8 @@ class PretrainingDataCollator:
         
         for instance in batch:
 
-            if instance['instance_type'] == 'loaded_caption_clip_slt':
-                input_text, pose, target_text = self._process_loaded_caption_clip_slt_instance(instance)
+            if instance['instance_type'] == 'sentence_level_dataset_slt':
+                input_text, pose, target_text = self._process_sentence_level_dataset_slt_instance(instance)
             elif instance['instance_type'] == 'caption_clip_slt':
                 input_text, pose, target_text = self._process_caption_clip_slt_instance(instance)
             elif instance['instance_type'] == 'random_clip_slt':
