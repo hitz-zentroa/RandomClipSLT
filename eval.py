@@ -4,7 +4,14 @@ import os
 import torch
 import yaml
 
+from data.keypoint_processing import (
+    get_keypoint_processing_config,
+    get_processed_keypoint_dim,
+    process_keypoint_clip,
+)
 from model import CustomByT5Model
+
+
 from sacrebleu.metrics import BLEU
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
@@ -13,20 +20,107 @@ from datasets import Dataset
 from transformers import AutoTokenizer, Seq2SeqTrainingArguments, Seq2SeqTrainer
 
 
+# TODO: eval_utils.py-ra eraman dudana hemendik kendu
 
 def decode_sentence(sentence):
     return bytes(list(sentence[(sentence != 0) & (sentence != 1)]-3)).decode('utf-8', errors='ignore')
 
 
-def test_how2sign(model, tokenizer, batch_size, hdf5_path, num_beams=1, device='cpu'):
+def decode_outputs(outputs, model_name, tokenizer):
+    use_byt5_decoder = 'byt5' in model_name.lower()
+
+    if use_byt5_decoder:
+        decoded_batch = [decode_sentence(output) for output in outputs]
+    else:
+        decoded_batch = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+    cleaned_batch = []
+    for decoded in decoded_batch:
+        if '\n' in decoded:
+            print('⚠️ Newline found in decoded output, replacing with space.')
+            decoded = decoded.replace('\n', ' ')
+        cleaned_batch.append(decoded)
+
+    return cleaned_batch
+
+
+def update_generation_stats(stats, outputs, tokenizer, generation_max_length):
+    eos_token_id = tokenizer.eos_token_id
+    pad_token_id = tokenizer.pad_token_id
+
+    for output in outputs:
+        output_list = output.tolist()
+
+        if eos_token_id in output_list:
+            has_eos = True
+            effective_length = output_list.index(eos_token_id) + 1
+        else:
+            has_eos = False
+            effective_length = len(output_list)
+            if pad_token_id is not None:
+                while effective_length > 0 and output_list[effective_length - 1] == pad_token_id:
+                    effective_length -= 1
+
+        stats['total'] += 1
+        stats['hit_max_length'] += int(effective_length == generation_max_length)
+        stats['no_eos'] += int(not has_eos)
+        stats['effective_length_sum'] += effective_length
+
+
+def format_generation_stats(stats, generation_max_length):
+    total = stats['total']
+    if total == 0:
+        return (
+            f'Generation max_length: {generation_max_length}\n'
+            'Generated outputs: 0\n'
+            'Hit max_length: 0 (0.00%)\n'
+            'No EOS: 0 (0.00%)\n'
+            'Mean generated token length: 0.00'
+        )
+
+    hit_max_length_pct = stats['hit_max_length'] / total * 100
+    no_eos_pct = stats['no_eos'] / total * 100
+    mean_effective_length = stats['effective_length_sum'] / total
+
+    return (
+        f'Generation max_length: {generation_max_length}\n'
+        f'Generated outputs: {total}\n'
+        f'Hit max_length: {stats["hit_max_length"]} ({hit_max_length_pct:.2f}%)\n'
+        f'No EOS: {stats["no_eos"]} ({no_eos_pct:.2f}%)\n'
+        f'Mean generated token length: {mean_effective_length:.2f}'
+    )
+
+
+def test_how2sign(
+    model,
+    model_name,
+    tokenizer,
+    batch_size,
+    hdf5_path,
+    keypoint_processing_config,
+    num_beams=1,
+    generation_max_length=128,
+    device='cpu'
+):
 
     ref = []
     out = []
+    generation_stats = {
+        'total': 0,
+        'hit_max_length': 0,
+        'no_eos': 0,
+        'effective_length_sum': 0
+    }
 
     poses = []
 
     input_text = 'slt 1 src:ase tgt:en\n'
-    encoded = tokenizer(batch_size * [input_text], padding=True, return_tensors='pt')
+    encoded = tokenizer(
+        batch_size * [input_text],
+        padding=True,
+        return_tensors='pt',
+        add_special_tokens=False
+    )
     input_ids = encoded['input_ids']
     text_attention_mask = encoded['attention_mask']
 
@@ -35,7 +129,19 @@ def test_how2sign(model, tokenizer, batch_size, hdf5_path, num_beams=1, device='
 
     with h5py.File(hdf5_path, 'r') as f:
         for _, sentence_group in f.items():
-            pose = torch.tensor(sentence_group['processed_keypoints'][:])
+            pose = torch.tensor(
+                process_keypoint_clip(
+                    sentence_group['keypoints'][:],
+                    sentence_group.attrs['width'],
+                    sentence_group.attrs['height'],
+                    keypoint_processing_config
+                ),
+                dtype=torch.float32
+            )
+            
+            # PROBA HONETARAKO BAKARRIK:
+            # pose[pose == -100] = -5
+
             poses.append(pose)
             sentence = sentence_group.attrs['sentence']
             ref.append(sentence)
@@ -57,26 +163,23 @@ def test_how2sign(model, tokenizer, batch_size, hdf5_path, num_beams=1, device='
                                         text_attention_mask=text_attention_mask[:real_size],
                                         vectors_attention_mask=pose_attention_mask,
                                         num_beams=num_beams,
-                                        max_length=256)
+                                        #repetition_penalty=1.5,
+                                        #length_penalty=0.6,
+                                        max_length=generation_max_length)
 
-        for output in outputs:
-            decoded = decode_sentence(output)
-            
-            if '\n' in decoded:
-                print('⚠️ Newline found in decoded output, replacing with space.')
-                decoded = decoded.replace('\n', ' ')
-            
-            out.append(decoded)
+        update_generation_stats(generation_stats, outputs, tokenizer, generation_max_length)
+        out.extend(decode_outputs(outputs, model_name, tokenizer))
 
-    return ref, out
+    return ref, out, generation_stats
 
 
 def main(args, config):
 
     model_name = config['model']['model_name']
-    input_dim = config['model']['input_dim']
     lora = config['model']['lora']
+    keypoint_config = config['data']['keypoints']
     beam_size = config['generation']['beam_size']
+    generation_max_length = config['generation']['max_length']
     h5_path = os.path.join(
         config['data']['how2sign']['path'],
         'hdf5',
@@ -84,6 +187,10 @@ def main(args, config):
     )
 
     os.makedirs(args.output_path)
+
+    input_dim = get_processed_keypoint_dim(keypoint_config)
+    print('input_dim:', input_dim)
+    keypoint_processing_config = get_keypoint_processing_config(keypoint_config)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -93,11 +200,23 @@ def main(args, config):
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     
-    ref, out = test_how2sign(model, tokenizer, batch_size=64, hdf5_path=h5_path, num_beams=beam_size, device=device)
+    ref, out, generation_stats = test_how2sign(
+        model,
+        model_name,
+        tokenizer,
+        batch_size=64,
+        hdf5_path=h5_path,
+        keypoint_processing_config=keypoint_processing_config,
+        num_beams=beam_size,
+        device=device,
+        generation_max_length=generation_max_length
+    )
     
     bleu = BLEU()
     bleu_score = bleu.corpus_score(out, [ref])
+    generation_stats_text = format_generation_stats(generation_stats, generation_max_length)
     print(bleu_score)
+    print(generation_stats_text)
 
     with open(os.path.join(args.output_path, 'ref.txt'), 'w') as f:
         f.write('\n'.join(ref) + '\n')
@@ -107,6 +226,7 @@ def main(args, config):
 
     with open(os.path.join(args.output_path, 'bleu.txt'), 'w') as f:
         print(bleu_score, file=f)
+        print(generation_stats_text, file=f)
 
 
 

@@ -1,8 +1,3 @@
-import os
-os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
-os.environ["GLOG_minloglevel"] = "2" # TODO: ez du funtzionatu, berdin idazten du
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3" # TODO: ez du funtzionatu, berdin idazten du
-
 import argparse
 import cv2
 import ffmpegio
@@ -10,6 +5,7 @@ import glob
 import h5py
 import mediapipe as mp
 import numpy as np
+import os
 import time
 import yaml
 
@@ -17,13 +13,13 @@ from functools import partial
 from multiprocessing import Pool
 from tqdm import tqdm
 
-
-OUT_OF_FRAME_NUM = -100
-NUM_HAND_LANDMARKS = 21
-NUM_MAIN_LANDMARKS = 25 # legs are always discarded
-FACE_INDICES = [0, 4, 13, 14, 17, 33, 37, 39, 46, 52, 55, 61, 64, 81, 82, 93, 133, 151, 152, 159, 172, 178, 181, 263, 269, 276, 282, 285, 291, 294, 311, 323, 362, 386, 397, 468, 473]
-NUM_LANDMARKS = 2*NUM_HAND_LANDMARKS + NUM_MAIN_LANDMARKS + len(FACE_INDICES)
-
+from data.keypoint_schema import (
+    OUT_OF_FRAME_NUM,
+    NUM_HAND_LANDMARKS,
+    NUM_MAIN_LANDMARKS,
+    FACE_INDICES,
+    NUM_LANDMARKS,
+)
 
 
 def process_frame(frame, holistic):
@@ -60,7 +56,7 @@ def process_frame(frame, holistic):
     else:
         for _ in range(len(FACE_INDICES)):
             frame_array.append(3*[OUT_OF_FRAME_NUM])
-    
+
     return np.array(frame_array, dtype=np.float32)
 
 
@@ -159,13 +155,12 @@ def main(args, config):
                     video_group.attrs['fps'] = float(result['probe']['frame_rate'])
                     video_group.attrs['width'] = result['probe']['width']
                     video_group.attrs['height'] = result['probe']['height']
-            
 
 
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config-path', type=str, default='configs/config.yaml')
+    parser.add_argument('--config-path', type=str, default='../configs/config.yaml')
     parser.add_argument('--num-processes', type=int, default=1)
     args = parser.parse_args()
 

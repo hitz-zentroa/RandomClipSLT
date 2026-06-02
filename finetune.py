@@ -4,16 +4,16 @@ import torch
 import yaml
 
 from data.data import sentence_level_hdf5_to_dataset, DataCollator
+from data.keypoint_processing import get_processed_keypoint_dim
+from eval_utils import compute_bleu_from_token_ids
 from model import CustomByT5Model
 
-from transformers import Seq2SeqTrainingArguments, Seq2SeqTrainer, AutoTokenizer
-
+from transformers import Seq2SeqTrainingArguments, Seq2SeqTrainer, AutoTokenizer, Adafactor
 
 
 def finetune_how2sign(args, config):
 
     model_name = config['model']['model_name']
-    input_dim = config['model']['input_dim']
     save_path = config['model']['save_path']
     # TODO: dataset desberdinetan doitzeko aukera ematean aldatu
     h5_path = os.path.join(
@@ -22,7 +22,12 @@ def finetune_how2sign(args, config):
         'train.h5'
     )
     val_hdf5_path = config['data']['val_hdf5_path'] # TODO: hau ere aldatzeko
+    keypoint_config = config['data']['keypoints']
+    generation_max_length = config['generation']['max_length']
     max_tokens = config['training']['max_tokens']
+    target_effective_batch_size = config['training']['finetune_target_effective_batch_size']
+    per_device_batch_sizes = config['training']['finetune_per_device_batch_sizes']
+    per_device_batch_sizes = config['training']['finetune_per_device_batch_sizes']
 
     train_ds = sentence_level_hdf5_to_dataset(
         h5_path, 
@@ -31,7 +36,7 @@ def finetune_how2sign(args, config):
         tgt_lang='en'
     )
 
-    print(f'Training dataset loaded from {h5_path} with {len(train_ds)} instances.')
+    print(f'Training dataset loaded with {len(train_ds)} instances.')
 
     val_ds = sentence_level_hdf5_to_dataset(
         val_hdf5_path,
@@ -40,7 +45,7 @@ def finetune_how2sign(args, config):
         tgt_lang='en'
     )
 
-    print(f'Validation dataset loaded from {val_hdf5_path} with {len(val_ds)} instances.')
+    print(f'Validation dataset loaded with {len(val_ds)} instances.')
 
     data_paths_dict = {
         'how2sign_train': h5_path,
@@ -48,33 +53,66 @@ def finetune_how2sign(args, config):
     }
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    def compute_metrics(eval_pred):
+        predictions, labels = eval_pred
+        if isinstance(predictions, tuple):
+            predictions = predictions[0]
+        return {
+            'bleu': compute_bleu_from_token_ids(
+                predictions,
+                labels,
+                model_name=model_name,
+                tokenizer=tokenizer
+            )
+        }
+
+    input_dim = get_processed_keypoint_dim(keypoint_config)
+    print('input_dim:', input_dim)
+    
     collator = DataCollator(
-        data_paths_dict, 
-        tokenizer, 
-        input_dim, 
+        data_paths=data_paths_dict, 
+        tokenizer=tokenizer, 
+        model_input_dim=input_dim,
+        keypoint_config=keypoint_config,
         max_tokens=max_tokens
     )
 
     model = CustomByT5Model(model_name=model_name, input_dim=input_dim, load_weights=False)
     model.load_state_dict(torch.load(args.checkpoint_path))
 
+    optimizer = Adafactor(
+        model.parameters(),
+        lr=1e-3,
+        relative_step=False,
+        scale_parameter=False
+    )
+
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    gradient_accumulation_steps = target_effective_batch_size // (per_device_batch_sizes['train'] * world_size)
+    print(f'Gradient accumulation steps: {gradient_accumulation_steps} (target effective batch size: {target_effective_batch_size}, per device batch size: {per_device_batch_sizes["train"]}, world size: {world_size})')
+
     training_args = Seq2SeqTrainingArguments(
         output_dir=os.path.join(save_path, args.run_name),
         run_name=args.run_name,
         logging_steps=100, # default 500. Kendu?
-        max_steps=5000,
-        per_device_train_batch_size=32,
-        per_device_eval_batch_size=64,
-        learning_rate=1e-3, # BEGIRATU EA ALDATU BEHAR DEN
+        max_steps=10000,
+        per_device_train_batch_size=per_device_batch_sizes['train'],
+        per_device_eval_batch_size=per_device_batch_sizes['eval'],
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        #learning_rate=5e-4,#1e-3,
         optim="adafactor",
-        #warmup_steps=1000,
-        lr_scheduler_type='constant',
+        lr_scheduler_type='constant_with_warmup',
+        # max_grad_norm=0,
+        warmup_steps=1000,
         eval_strategy='steps',
         save_strategy='steps',
         eval_steps=200,
         save_steps=200,
         save_total_limit=2,
-        metric_for_best_model='eval_loss',
+        metric_for_best_model='eval_bleu',
+        predict_with_generate=True,
+        generation_max_length=generation_max_length,
         bf16=True,
         remove_unused_columns=False,
         save_safetensors=False,
@@ -86,7 +124,9 @@ def finetune_how2sign(args, config):
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        data_collator=collator
+        data_collator=collator,
+        optimizers=(optimizer, None),
+        compute_metrics=compute_metrics
     )
 
     trainer.train(resume_from_checkpoint=args.resume)

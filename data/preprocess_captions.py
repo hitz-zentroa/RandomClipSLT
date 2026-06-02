@@ -1,6 +1,3 @@
-import os
-os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
-
 import argparse
 import cantofilter
 import fasttext
@@ -8,6 +5,7 @@ import glob
 import h5py
 import langcodes
 import numpy as np
+import os
 import webvtt
 import yaml
 

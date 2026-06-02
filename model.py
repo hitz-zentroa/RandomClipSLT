@@ -4,7 +4,7 @@ from peft import get_peft_model
 from torch import nn
 from transformers import T5ForConditionalGeneration, AutoConfig
 
-class CustomByT5Model(nn.Module):
+class CustomByT5Model(nn.Module): # TODO: izena aldatu?
     
     def __init__(self, model_name='google/byt5-small', input_dim=255, load_weights=True, lora_config=None):
         

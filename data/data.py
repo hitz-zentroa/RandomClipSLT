@@ -9,13 +9,7 @@ from more_itertools import chunked_even
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 
-
-
-# start_time and end_time are in ms
-def extract_interval_from_sequence(vectors, start_time, end_time, sampled_fps=12.5):
-    start_frame = round(start_time / 1000 * sampled_fps)
-    end_frame = round(end_time / 1000 * sampled_fps)
-    return vectors[start_frame:end_frame]
+from data.keypoint_processing import get_keypoint_processing_config, process_keypoint_clip
 
 
 def load_ehealth_data(excel_path):
@@ -51,231 +45,6 @@ def load_ehealth_data(excel_path):
         })
 
     return data
-
-
-# def simple_normalize(pose_data, inverse_aspect_ratio):
-
-#     pose_data = pose_data.reshape(pose_data.shape[0], -1, 3)
-
-#     mask = pose_data[:, :, 1] != OUT_OF_FRAME_NUM
-#     pose_data[:, :, 1][mask] *= inverse_aspect_ratio  # scale y-axis values to recover original proportions
-
-#     for frame_pose in pose_data:
-        
-#         if (np.any(frame_pose[L_SHOULDER_INDEX] == OUT_OF_FRAME_NUM) or 
-#             np.any(frame_pose[R_SHOULDER_INDEX] == OUT_OF_FRAME_NUM)):
-#             frame_pose[:] = OUT_OF_FRAME_NUM
-#             continue
-
-#         l_shoulder = frame_pose[L_SHOULDER_INDEX]
-#         r_shoulder = frame_pose[R_SHOULDER_INDEX]
-#         neck = (l_shoulder + r_shoulder) / 2
-#         dist = np.linalg.norm(l_shoulder - r_shoulder)
-
-#         mask = (frame_pose != OUT_OF_FRAME_NUM).all(axis=1)
-#         frame_pose[mask] -= neck
-#         frame_pose[mask] /= dist
-
-#     # Flatten back to original shape
-#     return pose_data.reshape(pose_data.shape[0], -1)
-
-
-# # hands and face should be normalized before the main pose, because some keypoints that are changed here are needed for the others
-# def normalize_main_pose(frame_pose):
-
-#     main_pose = frame_pose[2*21 : 2*21+len(POSE_INDICES)]
-
-#     l_shoulder = frame_pose[L_SHOULDER_INDEX]
-#     r_shoulder = frame_pose[R_SHOULDER_INDEX]
-#     l_wrist = frame_pose[0]
-#     r_wrist = frame_pose[21]
-#     nose = frame_pose[NOSE_INDEX]
-    
-#     if (l_shoulder[0] == OUT_OF_FRAME_NUM or 
-#         r_shoulder[0] == OUT_OF_FRAME_NUM):
-        
-#         main_pose[:] = OUT_OF_FRAME_NUM
-#         l_wrist[:] = OUT_OF_FRAME_NUM
-#         r_wrist[:] = OUT_OF_FRAME_NUM
-#         nose[:] = OUT_OF_FRAME_NUM # nose
-#         return
-    
-#     neck = (l_shoulder + r_shoulder) / 2
-#     dist = np.linalg.norm(l_shoulder - r_shoulder)
-
-#     mask = (main_pose != OUT_OF_FRAME_NUM).all(axis=1)
-#     main_pose[mask] -= neck
-#     main_pose[mask] /= dist
-
-#     if l_wrist[0] != OUT_OF_FRAME_NUM:
-#         l_wrist -= neck
-#         l_wrist /= dist
-
-#     if r_wrist[0] != OUT_OF_FRAME_NUM:  
-#         r_wrist -= neck
-#         r_wrist /= dist
-
-#     if nose[0] != OUT_OF_FRAME_NUM:
-#         nose -= neck
-#         nose /= dist
-    
-
-# def normalize_hands(frame_pose):
-
-#     for offset in [0, 21]:
-
-#         hand = frame_pose[offset:offset+21]
-
-#         wrist = frame_pose[offset]
-#         middle_mcp = frame_pose[offset+9]
-
-#         wrist_copy = wrist.copy()
-
-#         if (wrist[0] == OUT_OF_FRAME_NUM or 
-#             middle_mcp[0] == OUT_OF_FRAME_NUM):
-
-#             hand[:] = OUT_OF_FRAME_NUM
-#             wrist[:] = wrist_copy
-#             continue
-
-#         dist = np.linalg.norm(wrist - middle_mcp)
-
-#         mask = (hand != OUT_OF_FRAME_NUM).all(axis=1)
-#         hand[mask] -= wrist
-#         hand[mask] /= dist
-
-#         wrist[:] = wrist_copy
-    
-
-# def normalize_face(frame_pose):
-
-#     face = frame_pose[2*21 + len(POSE_INDICES) :]
-
-#     l_ear = frame_pose[L_EAR_INDEX]
-#     r_ear = frame_pose[R_EAR_INDEX]
-#     nose = frame_pose[NOSE_INDEX]
-
-#     nose_copy = nose.copy()
-
-#     if (l_ear[0] == OUT_OF_FRAME_NUM or 
-#         r_ear[0] == OUT_OF_FRAME_NUM or
-#         nose[0] == OUT_OF_FRAME_NUM):
-        
-#         face[:] = OUT_OF_FRAME_NUM
-#         nose[:] = nose_copy # Hau zertarako jarri nuen??
-#         return
-    
-#     dist = np.linalg.norm(l_ear - r_ear)
-
-#     mask = (face != OUT_OF_FRAME_NUM).all(axis=1)
-#     face[mask] -= nose
-#     face[mask] /= dist
-
-#     nose[:] = nose_copy
-
-
-# def normalize(pose_data, inverse_aspect_ratio):
-
-#     pose_data = pose_data.reshape(pose_data.shape[0], -1, 3)
-
-#     mask = pose_data[:, :, 1] != OUT_OF_FRAME_NUM
-#     pose_data[:, :, 1][mask] *= inverse_aspect_ratio  # scale y-axis values to recover original proportions
-
-#     for frame_pose in pose_data:
-
-#         normalize_hands(frame_pose)
-#         normalize_face(frame_pose)
-#         normalize_main_pose(frame_pose)
-
-#     return pose_data.reshape(pose_data.shape[0], -1)
-
-
-# def normalize_hands_shoulder_dist(frame_pose, dist):
-
-#     for offset in [0, 21]:
-#         hand = frame_pose[offset:offset+21]
-
-#         wrist = frame_pose[offset]
-#         wrist_copy = wrist.copy()
-
-#         if wrist[0] == OUT_OF_FRAME_NUM:
-#             hand[:] = OUT_OF_FRAME_NUM
-#             continue
-
-#         mask = (hand != OUT_OF_FRAME_NUM).all(axis=1)
-#         hand[mask] -= wrist
-#         hand[mask] /= dist
-
-#         wrist[:] = wrist_copy
-
-
-# def normalize_face_shoulder_dist(frame_pose, dist):
-    
-#     face = frame_pose[2*21 + len(POSE_INDICES) :]
-
-#     nose = frame_pose[NOSE_INDEX]
-#     nose_copy = nose.copy()
-
-#     if nose[0] == OUT_OF_FRAME_NUM:
-#         face[:] = OUT_OF_FRAME_NUM
-#         return
-
-#     mask = (face != OUT_OF_FRAME_NUM).all(axis=1)
-#     face[mask] -= nose
-#     face[mask] /= dist
-
-#     nose[:] = nose_copy
-
-
-# def normalize_main_pose_shoulder_dist(frame_pose, dist, neck):
-    
-#     main_pose = frame_pose[2*21 : 2*21+len(POSE_INDICES)]
-
-#     l_wrist = frame_pose[0]
-#     r_wrist = frame_pose[21]
-#     nose = frame_pose[NOSE_INDEX]
-
-#     mask = (main_pose != OUT_OF_FRAME_NUM).all(axis=1)
-#     main_pose[mask] -= neck
-#     main_pose[mask] /= dist
-
-#     if l_wrist[0] != OUT_OF_FRAME_NUM:
-#         l_wrist -= neck
-#         l_wrist /= dist
-
-#     if r_wrist[0] != OUT_OF_FRAME_NUM:  
-#         r_wrist -= neck
-#         r_wrist /= dist
-
-#     if nose[0] != OUT_OF_FRAME_NUM:
-#         nose -= neck
-#         nose /= dist
-
-
-# def normalize_only_shoulder_dist(pose_data, inverse_aspect_ratio):
-
-#     pose_data = pose_data.reshape(pose_data.shape[0], -1, 3)
-
-#     mask = pose_data[:, :, 1] != OUT_OF_FRAME_NUM
-#     pose_data[:, :, 1][mask] *= inverse_aspect_ratio  # scale y-axis values to recover original proportions
-
-#     for frame_pose in pose_data:
-
-#         if (frame_pose[L_SHOULDER_INDEX][0] == OUT_OF_FRAME_NUM or 
-#             frame_pose[R_SHOULDER_INDEX][0] == OUT_OF_FRAME_NUM):
-#             frame_pose[:] = OUT_OF_FRAME_NUM
-#             continue
-
-#         l_shoulder = frame_pose[L_SHOULDER_INDEX]
-#         r_shoulder = frame_pose[R_SHOULDER_INDEX]
-#         neck = (l_shoulder + r_shoulder) / 2
-#         dist = np.linalg.norm(l_shoulder - r_shoulder)
-
-#         normalize_hands_shoulder_dist(frame_pose, dist)
-#         normalize_face_shoulder_dist(frame_pose, dist)
-#         normalize_main_pose_shoulder_dist(frame_pose, dist, neck)
-
-#     return pose_data.reshape(pose_data.shape[0], -1)
 
 
 def impute(hand_array, interpolation_indices, partial_indices, max_gap=10):
@@ -404,7 +173,7 @@ def filter_captions(captions, max_characters=200, max_seconds=20, min_seconds=0.
     return filtered_captions
 
 
-def read_to_datasets(data_paths, frame_freq=2, chunk_seconds=34, max_characters=200, max_seconds=20, min_seconds=0.5, captions_langs=None):
+def read_to_datasets(data_paths, caption_config, random_clip_config):
 
     train_caption_real = []
     dev_caption_real = []
@@ -418,48 +187,61 @@ def read_to_datasets(data_paths, frame_freq=2, chunk_seconds=34, max_characters=
     train_random_synthetic = []
     dev_random_synthetic = []
 
+    # PROBA
+    # with open('/tartalo01/users/balkain001/TRAIN/YouTube-SL-25/youtube-asl_youtube_asl_video_ids.txt') as f:
+    #     youtube_asl_video_ids = set(line.strip() for line in f)
+
     for data_path in data_paths:
 
         with h5py.File(data_path, 'r') as h5_file:
 
             for id, video_group in tqdm(h5_file.items()):
-                
-                sampled_fps = video_group.attrs['fps'] / frame_freq
-                aprox_chunk_length = round(chunk_seconds * sampled_fps)
-                keypoint_ds = video_group['processed_keypoints']
-                
+
+                # PROBA: YouTube ASLeko bideoak bakarrik kargatu
+                # if id not in youtube_asl_video_ids:
+                #     continue
+
+                fps = video_group.attrs['fps']
+                aprox_chunk_length = round(random_clip_config['chunk_seconds'] * fps)
+                keypoint_ds = video_group['keypoints']
+
                 if keypoint_ds.shape[0] == 0:
                     continue
-                
+
                 chunks_indices = list(chunked_even(range(keypoint_ds.shape[0]), aprox_chunk_length))
 
-                #TODO: momentuz txapuza hau dev multzo bat izateko. Pentsatu datu gehiagorekin balioko duen zerbait
-                #split = 'dev' if id[0] == '1' else 'train' # LSE
+                # TODO: dev hemendik guztiz kendu
+                # split = 'dev' if id[0] == '1' else 'train' # LSE
                 # split = 'dev' if id == '14SjcMwwNhM' or id == '1y8vXjLQWL0' or id == '23tQHcy3VnI' or id == '14diAi-BS40' or id == '--7t6QjMwpY' or id == '--pq96V-6DA' or id == '-0VIwubCjpM' else 'train' # ASL # 14diAi-BS40 EZ DAGO!
                 split = 'train'
 
                 for lang, captions_ds in video_group['captions'].items():
 
-                    if captions_langs and lang not in captions_langs:
+                    if caption_config['langs'] is not None and lang not in caption_config['langs']:
                         continue
 
                     captions = convert_captions_dataset(captions_ds)
-                    captions = filter_captions(captions, max_characters=max_characters, max_seconds=max_seconds, min_seconds=min_seconds)
+                    captions = filter_captions(
+                        captions,
+                        max_characters=caption_config["max_characters"],
+                        max_seconds=caption_config["max_seconds"],
+                        min_seconds=caption_config["min_seconds"],
+                    )
                     avg_cap_dur = average_caption_duration(captions)
 
                     for caption in captions:
 
-                        start_frame = round(caption['start_time'] / 1000 * sampled_fps)
-                        end_frame = round(caption['end_time'] / 1000 * sampled_fps)
+                        start_frame = round(caption['start_time'] / 1000 * fps)
+                        end_frame = round(caption['end_time'] / 1000 * fps)
 
-                        if start_frame > keypoint_ds.shape[0]:
-                            continue
-
-                        if not end_frame > start_frame:
+                        if start_frame >= keypoint_ds.shape[0]:
                             continue
 
                         if end_frame > keypoint_ds.shape[0]:
                             end_frame = keypoint_ds.shape[0]
+
+                        if not end_frame > start_frame:
+                            continue
 
                         instance = {
                             'instance_type': 'caption_clip_slt',
@@ -468,10 +250,12 @@ def read_to_datasets(data_paths, frame_freq=2, chunk_seconds=34, max_characters=
                             'tgt_lang': lang,
                             'start_frame': start_frame,
                             'end_frame': end_frame,
+                            'width': video_group.attrs['width'],
+                            'height': video_group.attrs['height'],
                             'video_id': id,
                             'all_captions': None,
                             'avg_cap_dur': None,
-                            'sampled_fps': None,
+                            'fps': None,
                         }
 
                         if split == 'train':
@@ -487,12 +271,14 @@ def read_to_datasets(data_paths, frame_freq=2, chunk_seconds=34, max_characters=
 
                     previous_indices = chunks_indices[0]
                     for current_indices in chunks_indices[1:]:
-                        
+
                         instance = {
                             'instance_type': 'random_clip_slt',
                             'all_captions': captions,
                             'avg_cap_dur': avg_cap_dur,
-                            'sampled_fps': sampled_fps,
+                            'fps': fps,
+                            'width': video_group.attrs['width'],
+                            'height': video_group.attrs['height'],
                             'start_frame': previous_indices[0],
                             'end_frame': current_indices[-1] + 1,
                             'src_lang': video_group.attrs['sign_lang'],
@@ -530,7 +316,7 @@ def sentence_level_hdf5_to_dataset(data_path, dataset_name, src_lang, tgt_lang):
     instances = []
 
     with h5py.File(data_path, 'r') as f:
-        for sentence_id in f.keys():
+        for sentence_id, sentence_group in f.items():
             # These datasets won't be concatenated with others, so the fields in each instance
             # don't need to be compatible with other instance types.
             instances.append({
@@ -538,6 +324,9 @@ def sentence_level_hdf5_to_dataset(data_path, dataset_name, src_lang, tgt_lang):
                 'src_lang': src_lang,
                 'tgt_lang': tgt_lang,
                 'dataset_name': dataset_name,
+                'tgt_sentence': sentence_group.attrs['sentence'],
+                'height': sentence_group.attrs['height'],
+                'width': sentence_group.attrs['width'],
                 'sentence_id': sentence_id
             })
 
@@ -559,7 +348,9 @@ def convert_opus_dataset(instance):
         'video_id': None,
         'all_captions': None,
         'avg_cap_dur': None,
-        'sampled_fps': None
+        'width': None,
+        'height': None,
+        'fps': None
     }
 
 
@@ -594,7 +385,7 @@ def load_mt_datasets(mt_pairs, max_characters=200):
     return concatenate_datasets(mt_datasets), concatenate_datasets(reverse_mt_datasets)
 
 
-def get_text_with_timestamps(captions, interval_start_time=0):
+def get_text_with_timestamps(captions, interval_start_time):
     
     text_with_timestamps = []
     for caption in captions:
@@ -623,85 +414,114 @@ class DataCollator:
         self, 
         data_paths, 
         tokenizer, 
-        model_input_dim, 
-        pose_pad_value=0.0, 
-        chunk_seconds=34, 
-        min_duration_seconds=17,
-        max_tokens=800
+        model_input_dim,
+        keypoint_config,
+        max_tokens,
+        random_clip_config=None,
+        pose_pad_value=0.0
     ):
 
         self.data_paths = data_paths
         self.files = None
-        
-        self.tokenizer = tokenizer
-        self.pose_pad_value = pose_pad_value
-        self.model_input_dim = model_input_dim
-        self.chunk_seconds = chunk_seconds
-        self.min_duration_seconds = min_duration_seconds
-        self.max_tokens = max_tokens
 
+        self.keypoint_processing_config = get_keypoint_processing_config(
+            keypoint_config
+        )
+
+        self.random_clip_config = random_clip_config
+        if random_clip_config is not None:
+            self.chunk_seconds = random_clip_config['chunk_seconds']
+            self.min_duration_seconds = random_clip_config['min_duration_seconds']
+        else:
+            self.chunk_seconds = None
+            self.min_duration_seconds = None
+
+        self.max_tokens = max_tokens
+        self.pose_pad_value = pose_pad_value
+
+        self.tokenizer = tokenizer
+        self.model_input_dim = model_input_dim
 
     def _ensure_files_open(self):
-        
+
         if self.files is None:
             self.files = {
                 file_key: h5py.File(data_path, 'r')
                 for file_key, data_path in self.data_paths.items()
             }
-    
 
     def _caption_level_input_text(self, src_lang, tgt_lang):
         return f'slt 1 src:{src_lang} tgt:{tgt_lang}\n'
-    
-    
+
     def _process_sentence_level_dataset_slt_instance(self, instance):
 
+        width = instance['width']
+        height = instance['height']
+        # TODO: probatu frame_freq-etik behin bakarrik kargatzen
         sentence_group = self.files[instance['dataset_name']][instance['sentence_id']]
-        pose = torch.tensor(sentence_group['processed_keypoints'][:], dtype=torch.float32)
-        input_text = self._caption_level_input_text(instance["src_lang"], instance["tgt_lang"])
-        target_text = sentence_group.attrs['sentence']
+        pose = sentence_group['keypoints'][:]
+        pose = torch.tensor(
+            process_keypoint_clip(pose, width, height, self.keypoint_processing_config),
+            dtype=torch.float32,
+        )
+        input_text = self._caption_level_input_text(instance['src_lang'], instance['tgt_lang'])
+        target_text = instance['tgt_sentence']
 
         return input_text, pose, target_text
 
-    
     def _process_caption_clip_slt_instance(self, instance):
-        
-        video_group = self.files[instance['src_lang']][instance['video_id']]
+
         start_frame = instance['start_frame']
         end_frame = instance['end_frame']
-        pose = torch.tensor(video_group['processed_keypoints'][start_frame:end_frame], dtype=torch.float32)
-        input_text = self._caption_level_input_text(instance["src_lang"], instance["tgt_lang"])
+        width = instance['width']
+        height = instance['height']
+        video_group = self.files[instance['src_lang']][instance['video_id']]
+        pose = video_group['keypoints'][start_frame:end_frame]
+        pose = torch.tensor(
+            process_keypoint_clip(pose, width, height, self.keypoint_processing_config),
+            dtype=torch.float32
+        )
+        input_text = self._caption_level_input_text(instance['src_lang'], instance['tgt_lang'])
         target_text = instance['tgt_sentence']    
 
         return input_text, pose, target_text
-    
 
     def _process_random_clip_slt_instance(self, instance):
-        
-        video_group = self.files[instance['src_lang']][instance['video_id']]
+        if self.random_clip_config is None:
+            raise ValueError(
+                'DataCollator received a random_clip_slt instance, but '
+                'random_clip_config was not provided.'
+            )
+
         start_frame = instance['start_frame']
         end_frame = instance['end_frame']
-        chunk_pose = video_group['processed_keypoints'][start_frame:end_frame]
+        video_group = self.files[instance['src_lang']][instance['video_id']]
+        chunk_pose = video_group['keypoints'][start_frame:end_frame]
 
         n_frame_count = len(chunk_pose) // 2
-        m_frame_count = int(self.min_duration_seconds * instance['sampled_fps'])
-        start_frame = random.randint(0, n_frame_count)
+        m_frame_count = int(self.min_duration_seconds * instance['fps'])
+        relative_start_frame = random.randint(0, n_frame_count)
         if random.random() < 0.8:
-            end_frame = start_frame + n_frame_count
+            relative_end_frame = relative_start_frame + n_frame_count
         else:
-            end_frame = start_frame + random.randint(m_frame_count, n_frame_count)
-        
-        instance_start_frame = instance['start_frame']
-        start_time = (instance_start_frame + start_frame) / instance['sampled_fps'] * 1000
-        end_time = (instance_start_frame + end_frame) / instance['sampled_fps'] * 1000
+            relative_end_frame = relative_start_frame + random.randint(m_frame_count, n_frame_count)
+
+        width = instance['width']
+        height = instance['height']
+        pose = chunk_pose[relative_start_frame:relative_end_frame]
+        pose = torch.tensor(
+            process_keypoint_clip(pose, width, height, self.keypoint_processing_config),
+            dtype=torch.float32
+        )
+
+        start_time = (start_frame + relative_start_frame) / instance['fps'] * 1000
+        end_time = (start_frame + relative_end_frame) / instance['fps'] * 1000
         prev_captions, curr_captions, next_captions = extract_interval_captions(
             instance['all_captions'], 
             start_time, 
             end_time,
             context_seconds=self.min_duration_seconds
         )
-
-        pose = torch.tensor(chunk_pose[start_frame:end_frame], dtype=torch.float32)
 
         input_text = 'slt'
 
@@ -744,19 +564,17 @@ class DataCollator:
             target_text = get_text_with_timestamps(curr_captions, interval_start_time=start_time)
         else:
             target_text = '\n'.join(caption['sentence'] for caption in curr_captions) # separazioa egotea nahi dugu?
-        
+
         if guess_lang_id:
             target_text = f'{instance["src_lang"]} {instance["tgt_lang"]}\n{target_text}'
 
         return input_text, pose, target_text
 
-
     def _process_text_mt_instance(self, instance):
-        
+
         input_text = f'mt src:{instance["src_lang"]} tgt:{instance["tgt_lang"]}\n{instance["src_sentence"]}'
 
         return input_text, instance['tgt_sentence']
-
 
     def __call__(self, batch):
 
@@ -765,7 +583,7 @@ class DataCollator:
         input_texts = []
         poses = []
         target_texts = []
-        
+
         for instance in batch:
 
             if instance['instance_type'] == 'sentence_level_dataset_slt':
@@ -784,7 +602,10 @@ class DataCollator:
                 f'Processed keypoints dimension {pose.shape[1]} '
                 f'does not match model input dimension {self.model_input_dim}'
             )
-            
+
+            # PROBA
+            # pose[pose == -100] = -5
+
             input_texts.append(input_text)
             poses.append(pose)
             target_texts.append(target_text)
@@ -803,10 +624,15 @@ class DataCollator:
             print()
             '''
 
-        encoded = self.tokenizer(input_texts, padding=True, return_tensors='pt')
+        encoded = self.tokenizer(
+            input_texts,
+            padding=True,
+            return_tensors='pt',
+            add_special_tokens=False
+        )
         input_ids = encoded['input_ids']
         text_attention_mask = encoded['attention_mask']
-        
+
         # Shape: (batch_size, max_seq_len, model_input_dim)
         padded_poses = pad_sequence(poses, batch_first=True, padding_value=self.pose_pad_value)
         pose_attention_mask = (~torch.all(padded_poses == 0.0, dim=-1)).long()
@@ -821,78 +647,79 @@ class DataCollator:
             'vectors_attention_mask': pose_attention_mask[:, :self.max_tokens],
             'labels': tokenized_target[:, :self.max_tokens]
         }
-        
+
         return batch_dict
-        
+
 
 class DebugTextOnlyDataCollator:
     def __init__(
         self, 
         data_paths, 
         tokenizer, 
-        model_input_dim, 
-        pose_pad_value=0.0, 
-        chunk_seconds=34, 
-        min_duration_seconds=17
+        model_input_dim,
+        keypoint_config,
+        max_tokens,
+        random_clip_config=None,
+        pose_pad_value=0.0
     ):
 
         self.data_paths = data_paths
-        self.files = None
-        
-        self.tokenizer = tokenizer
+        self.random_clip_config = random_clip_config
+        if random_clip_config is not None:
+            self.chunk_seconds = random_clip_config['chunk_seconds']
+            self.min_duration_seconds = random_clip_config['min_duration_seconds']
+        else:
+            self.chunk_seconds = None
+            self.min_duration_seconds = None
+
+        self.max_tokens = max_tokens
         self.pose_pad_value = pose_pad_value
+
+        self.tokenizer = tokenizer
         self.model_input_dim = model_input_dim
-        self.chunk_seconds = chunk_seconds
-        self.min_duration_seconds = min_duration_seconds
 
+    def _caption_level_input_text(self, src_lang, tgt_lang):
+        return f'slt 1 src:{src_lang} tgt:{tgt_lang}\n'
 
-    # def _ensure_files_open(self):
-        
-    #     if self.files is None:
-    #         self.files = {
-    #             lang: h5py.File(data_path, 'r')
-    #             for lang, data_path in self.data_paths.items()
-    #         }
+    def _process_sentence_level_dataset_slt_instance(self, instance):
+        input_text = self._caption_level_input_text(instance['src_lang'], instance['tgt_lang'])
+        target_text = instance['tgt_sentence']
 
+        return input_text, target_text
 
     def _process_caption_clip_slt_instance(self, instance):
-        
-        # video_group = self.files[instance['src_lang']][instance['video_id']]
-        # start_frame = instance['start_frame']
-        # end_frame = instance['end_frame']
-        # pose = torch.tensor(video_group['processed_keypoints'][start_frame:end_frame], dtype=torch.float32)
-        input_text = f'slt 1 src:{instance["src_lang"]} tgt:{instance["tgt_lang"]}\n'
+        input_text = self._caption_level_input_text(instance['src_lang'], instance['tgt_lang'])
         target_text = instance['tgt_sentence']    
 
-        return input_text, None, target_text
+        return input_text, target_text
     
 
     def _process_random_clip_slt_instance(self, instance):
-        
-        # video_group = self.files[instance['src_lang']][instance['video_id']]
+        if self.random_clip_config is None:
+            raise ValueError(
+                'DebugTextOnlyDataCollator received a random_clip_slt instance, '
+                'but random_clip_config was not provided.'
+            )
+
         start_frame = instance['start_frame']
         end_frame = instance['end_frame']
-        # chunk_pose = video_group['processed_keypoints'][start_frame:end_frame]
 
-        n_frame_count = int(self.chunk_seconds * instance['sampled_fps'])  #len(chunk_pose) // 2
-        m_frame_count = int(self.min_duration_seconds * instance['sampled_fps'])
-        start_frame = random.randint(0, n_frame_count)
+        n_frame_count = (end_frame - start_frame) // 2
+        m_frame_count = int(self.min_duration_seconds * instance['fps'])
+        relative_start_frame = random.randint(0, n_frame_count)
         if random.random() < 0.8:
-            end_frame = start_frame + n_frame_count
+            relative_end_frame = relative_start_frame + n_frame_count
         else:
-            end_frame = start_frame + random.randint(m_frame_count, n_frame_count)
+            relative_end_frame = relative_start_frame + random.randint(m_frame_count, n_frame_count)
         
-        instance_start_frame = instance['start_frame']
-        start_time = (instance_start_frame + start_frame) / instance['sampled_fps'] * 1000
-        end_time = (instance_start_frame + end_frame) / instance['sampled_fps'] * 1000
+        start_time = (start_frame + relative_start_frame) / instance['fps'] * 1000
+        end_time = (start_frame + relative_end_frame) / instance['fps'] * 1000
         prev_captions, curr_captions, next_captions = extract_interval_captions(
             instance['all_captions'], 
             start_time, 
             end_time,
             context_seconds=self.min_duration_seconds
         )
-
-        # pose = torch.tensor(chunk_pose[start_frame:end_frame], dtype=torch.float32)
 
         input_text = 'slt'
 
@@ -939,7 +766,7 @@ class DebugTextOnlyDataCollator:
         if guess_lang_id:
             target_text = f'{instance["src_lang"]} {instance["tgt_lang"]}\n{target_text}'
 
-        return input_text, None, target_text
+        return input_text, target_text
 
 
     def _process_text_mt_instance(self, instance):
@@ -954,28 +781,22 @@ class DebugTextOnlyDataCollator:
         # self._ensure_files_open()
 
         input_texts = []
-        # poses = []
         target_texts = []
         
         for instance in batch:
 
-            if instance['instance_type'] == 'caption_clip_slt':
-                input_text, pose, target_text = self._process_caption_clip_slt_instance(instance)
+            if instance['instance_type'] == 'sentence_level_dataset_slt':
+                input_text, target_text = self._process_sentence_level_dataset_slt_instance(instance)
+            elif instance['instance_type'] == 'caption_clip_slt':
+                input_text, target_text = self._process_caption_clip_slt_instance(instance)
             elif instance['instance_type'] == 'random_clip_slt':
-                input_text, pose, target_text = self._process_random_clip_slt_instance(instance)
+                input_text, target_text = self._process_random_clip_slt_instance(instance)
             elif instance['instance_type'] == 'text_mt':
                 input_text, target_text = self._process_text_mt_instance(instance)
-                pose = torch.zeros((0, self.model_input_dim))
             else:
                 raise ValueError(f"Unknown instance type: {instance['instance_type']}")
 
-            # assert pose.shape[1] == self.model_input_dim, (
-            #     f'Processed keypoints dimension {pose.shape[1]} '
-            #     f'does not match model input dimension {self.model_input_dim}'
-            # )
-            
             input_texts.append(input_text)
-            # poses.append(pose)
             target_texts.append(target_text)
 
             # DEBUG
@@ -992,26 +813,25 @@ class DebugTextOnlyDataCollator:
             print()
             '''
 
-        encoded = self.tokenizer(input_texts, padding=True, return_tensors='pt')
+        encoded = self.tokenizer(
+            input_texts,
+            padding=True,
+            return_tensors='pt',
+            add_special_tokens=False
+        )
         input_ids = encoded['input_ids']
         text_attention_mask = encoded['attention_mask']
-        
-        # Shape: (batch_size, max_seq_len, model_input_dim)
-        # padded_poses = pad_sequence(poses, batch_first=True, padding_value=self.pose_pad_value)
-        # pose_attention_mask = (~torch.all(padded_poses == 0.0, dim=-1)).long()
 
         tokenized_target = self.tokenizer(target_texts, padding=True, return_tensors="pt")["input_ids"]
         tokenized_target[tokenized_target == self.tokenizer.pad_token_id] = -100
 
         batch_dict = {
-            'input_ids': input_ids,
-            # 'input_vectors': padded_poses,
-            # 'text_attention_mask': text_attention_mask,
-            # 'vectors_attention_mask': pose_attention_mask,
-            'labels': tokenized_target,
+            'input_ids': input_ids[:, :self.max_tokens],
+            'text_attention_mask': text_attention_mask[:, :self.max_tokens],
+            'labels': tokenized_target[:, :self.max_tokens],
             'input_texts': input_texts,
             'target_texts': target_texts,
-            'video_ids': [instance['video_id'] for instance in batch],
+            'video_ids': [instance.get('video_id') for instance in batch],
             'instance_types': [instance['instance_type'] for instance in batch]
         }
         

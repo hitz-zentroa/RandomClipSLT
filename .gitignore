@@ -1,6 +1,8 @@
 *.ipynb
+*.pdf
 outputs/
 wandb/
 __pycache__/
 .vscode/
 configs/config_*.yaml
+AGENTS.md
