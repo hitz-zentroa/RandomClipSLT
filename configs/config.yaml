@@ -1,6 +1,6 @@
 data:
   hdf5_path: /path/to/the/directory
-  val_hdf5_path: /path/to/the/file.hdf5 # TODO: aldatu zehazteko balidaziokoa how2sign dela, eta hortik hartu patha
+  val_hdf5_path: /path/to/the/file.hdf5
   how2sign:
     path: /path/to/the/directory
   captions:
@@ -8,7 +8,7 @@ data:
     max_characters: 200
     max_seconds: 20
     min_seconds: 0.5
-    langs:
+    langs: # null to include all languages
       - en
       - es
   videos:
@@ -16,7 +16,7 @@ data:
   keypoints:
     frame_freq: 2
     mediapipe_model_complexity: 1
-    use_z: false
+    use_z: true
     main_pose_landmarks:
       include_face: true
       include_hands: true
@@ -27,18 +27,32 @@ data:
   mt_pairs:
     - en-es
 model:
-  model_name: google/byt5-small
-  input_dim: 204 # TODO: funtzio bat sortu datu hau konfiguraziotik lortzeko
+  model_name: google/t5-v1_1-base
   lora: false
+  save_path: /gscratch5/users/balkain001/TRAIN/byt5
 generation:
   beam_size: 5
+  max_length: 128
 training:
   max_tokens: 800
   initial_data_proportions:
-    mt: 0.45
-    caption_clip: 0.55
-    random_clip: 0.0
+    mt: 0
+    caption_clip: 1
+    random_clip: 0
   data_proportions:
-    mt: 0.5
-    caption_clip: 0.25
-    random_clip: 0.25
+    mt: 0
+    caption_clip: 0.5
+    random_clip: 0.5
+  target_effective_batch_size: 128
+  finetune_target_effective_batch_size: 128
+  initial_per_device_batch_sizes:
+    train: 64
+    eval: 128
+  per_device_batch_sizes:
+    train: 8
+    eval: 128
+  finetune_per_device_batch_sizes:
+    train: 32
+    eval: 128
+  initial_max_steps: 100000
+  max_steps: 100000
