@@ -16,6 +16,25 @@ from data.keypoint_schema import (
 )
 
 
+NEGATIVE_SENTINEL = "negative_sentinel"
+ZERO_WITH_PRESENCE = "zero_with_presence"
+MISSING_REPRESENTATIONS = {NEGATIVE_SENTINEL, ZERO_WITH_PRESENCE}
+
+
+def get_missing_representation(keypoint_config):
+    missing_representation = keypoint_config.get(
+        "missing_representation",
+        NEGATIVE_SENTINEL,
+    )
+    if missing_representation not in MISSING_REPRESENTATIONS:
+        raise ValueError(
+            f"Unknown keypoint missing_representation: "
+            f"{missing_representation!r}. Expected one of "
+            f"{sorted(MISSING_REPRESENTATIONS)}."
+        )
+    return missing_representation
+
+
 def get_main_landmarks_list(main_landmarks_config):
 
     main_landmarks_list = []
@@ -43,11 +62,16 @@ def get_processed_keypoint_dim(keypoint_config, main_landmarks_list=None):
 
     num_coords = 3 if keypoint_config["use_z"] else 2
 
-    return num_coords * (
+    num_landmarks = (
         2 * NUM_HAND_LANDMARKS
         + len(main_landmarks_list)
         + len(FACE_INDICES)
     )
+    features_per_landmark = num_coords
+    if get_missing_representation(keypoint_config) == ZERO_WITH_PRESENCE:
+        features_per_landmark += 1
+
+    return features_per_landmark * num_landmarks
 
 
 def get_keypoint_processing_config(keypoint_config):
@@ -58,6 +82,8 @@ def get_keypoint_processing_config(keypoint_config):
     return {
         "frame_freq": keypoint_config["frame_freq"],
         "use_z": keypoint_config["use_z"],
+        "num_coords": 3 if keypoint_config["use_z"] else 2,
+        "missing_representation": get_missing_representation(keypoint_config),
         "main_landmarks_list": main_landmarks_list,
         "l_shoulder_index": main_landmarks_list.index(MAIN_SHOULDER_INDICES[0]),
         "r_shoulder_index": main_landmarks_list.index(MAIN_SHOULDER_INDICES[1]),
@@ -208,5 +234,16 @@ def process_keypoint_clip(pose_data, width, height, keypoint_processing_config):
         l_shoulder_index,
         r_shoulder_index
     )
+
+    if keypoint_processing_config["missing_representation"] == ZERO_WITH_PRESENCE:
+        num_coords = keypoint_processing_config["num_coords"]
+        pose_data = pose_data.reshape(pose_data.shape[0], -1, num_coords)
+        presence = (pose_data[..., :1] != OUT_OF_FRAME_NUM).astype(
+            pose_data.dtype,
+            copy=False,
+        )
+        pose_data = np.where(presence.astype(bool), pose_data, 0.0)
+        pose_data = np.concatenate([pose_data, presence], axis=-1)
+        pose_data = pose_data.reshape(pose_data.shape[0], -1)
 
     return pose_data

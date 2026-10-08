@@ -5,7 +5,8 @@ from torch import nn
 from transformers import T5ForConditionalGeneration, AutoConfig
 
 class CustomByT5Model(nn.Module): # TODO: izena aldatu?
-    
+    accepts_loss_kwargs = False
+
     def __init__(self, model_name='google/byt5-small', input_dim=255, load_weights=True, lora_config=None):
         
         super().__init__()
@@ -28,9 +29,6 @@ class CustomByT5Model(nn.Module): # TODO: izena aldatu?
    
     def forward(self, input_ids, input_vectors, text_attention_mask, vectors_attention_mask, labels=None, **kwargs): # labels esplizituki jarri gabe ebaluazioan arazoak ematen ditu
         
-        if 'num_items_in_batch' in kwargs:
-            kwargs.pop('num_items_in_batch') # huggingface bertsioa eguneratzean arazoak ematen hasi zelako. Ez dakit zertarako behar den
-        
         projected_inputs = self.projection(input_vectors) # (batch_size, vectors_seq_len, d_model)
         text_embeds = self.byt5.encoder.embed_tokens(input_ids) # (batch_size, text_seq_len, d_model) Baliteke ez funtzionatzea batch_size dimentsio bakarra baino gehiago badaude
         input_embeds = torch.cat((text_embeds, projected_inputs), dim=1) # (batch_size, text_seq_len + vectors_seq_len, d_model)
@@ -47,7 +45,6 @@ class CustomByT5Model(nn.Module): # TODO: izena aldatu?
         text_embeds = self.byt5.encoder.embed_tokens(input_ids)
         input_embeds = torch.cat((text_embeds, projected_inputs), dim=1)
         attention_mask = torch.cat((text_attention_mask, vectors_attention_mask), dim=1)
-        # igual aldatu beharko nuke beti tamaina berekoak sortu ditzan, gero -100ak ez agertzeko?
         outputs = self.byt5.generate(inputs_embeds=input_embeds,
                                      attention_mask=attention_mask,
                                      **kwargs)
@@ -56,6 +53,8 @@ class CustomByT5Model(nn.Module): # TODO: izena aldatu?
 
 
 class VectorsOnlyCustomByT5Model(nn.Module):
+    accepts_loss_kwargs = False
+
     def __init__(self, model_name='google/byt5-small', input_dim=255, load_weights=True, lora_config=None):
         super().__init__()
         
@@ -76,9 +75,6 @@ class VectorsOnlyCustomByT5Model(nn.Module):
 
     #def forward(self, input_vectors, attention_mask=None, labels=None): # decoder_input_ids=None, ?
     def forward(self, input_vectors, labels=None, **kwargs): # labels esplizituki jarri gabe ebaluazioan arazoak ematen ditu
-        if 'num_items_in_batch' in kwargs:
-            kwargs.pop('num_items_in_batch') # huggingface bertsioa eguneratzean arazoak ematen hasi zelako. Ez dakit zertarako behar den
-        
         # Project input vectors to the required dimension
         projected_inputs = self.projection(input_vectors)
 

@@ -8,15 +8,14 @@ data:
     max_characters: 200
     max_seconds: 20
     min_seconds: 0.5
-    langs: # null to include all languages
-      - en
-      - es
+    langs: null # null to include all languages
   videos:
     path: /path/to/the/directory
   keypoints:
     frame_freq: 2
     mediapipe_model_complexity: 1
     use_z: true
+    missing_representation: zero_with_presence
     main_pose_landmarks:
       include_face: true
       include_hands: true
@@ -24,35 +23,45 @@ data:
   random_clips:
     chunk_seconds: 34 # "n=34" from the paper
     min_duration_seconds: 17 # "m=17" from the paper
+    require_caption: false
+    include_alignment_task: true
   mt_pairs:
     - en-es
 model:
-  model_name: google/t5-v1_1-base
+  model_name: google/byt5-base
   lora: false
-  save_path: /gscratch5/users/balkain001/TRAIN/byt5
+  save_path: /path/to/the/directory
 generation:
   beam_size: 5
-  max_length: 128
+  max_length: 512
 training:
-  max_tokens: 800
+  seed: 42
+  data_seed: 42
+  max_lengths:
+    input_text_tokens: 512
+    pose_frames: 512
+    target_tokens: 512
   initial_data_proportions:
-    mt: 0
-    caption_clip: 1
+    mt: 0.4
+    caption_clip: 0.6
     random_clip: 0
   data_proportions:
-    mt: 0
-    caption_clip: 0.5
-    random_clip: 0.5
+    mt: 0.4
+    caption_clip: 0.3
+    random_clip: 0.3
   target_effective_batch_size: 128
-  finetune_target_effective_batch_size: 128
+  finetune_target_effective_batch_size: 32
   initial_per_device_batch_sizes:
-    train: 64
+    train: 16
     eval: 128
   per_device_batch_sizes:
     train: 8
     eval: 128
   finetune_per_device_batch_sizes:
-    train: 32
+    train: 16
     eval: 128
-  initial_max_steps: 100000
-  max_steps: 100000
+  lr: 1e-3
+  finetune_lr: 0.0005
+  initial_max_steps: 200000
+  max_steps: 200000
+  finetune_max_steps: 6000

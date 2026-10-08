@@ -1,3 +1,5 @@
+from bisect import bisect_left
+
 import h5py
 import numpy as np
 import pandas as pd
@@ -10,6 +12,17 @@ from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 
 from data.keypoint_processing import get_keypoint_processing_config, process_keypoint_clip
+
+
+
+T5_NEWLINE_TOKEN = '<extra_id_99>'
+
+
+def preserve_newlines_for_tokenizer(tokenizer, texts):
+    tokenizer_class = tokenizer.__class__.__name__.lower()
+    if not tokenizer_class.startswith('t5tokenizer'):
+        return texts
+    return [text.replace('\n', f' {T5_NEWLINE_TOKEN} ') for text in texts]
 
 
 def load_ehealth_data(excel_path):
@@ -113,7 +126,7 @@ def temporal_imputation(pose_data):
         impute(hand_array, interpolation_indices, partial_indices, max_gap=10)
 
 
-def extract_interval_captions(caption_list, start_time, end_time, context_seconds=17):
+def extract_interval_captions(caption_list, start_time, end_time, context_seconds=34):
 
     prev = []
     curr = []
@@ -208,6 +221,13 @@ def read_to_datasets(data_paths, caption_config, random_clip_config):
                 if keypoint_ds.shape[0] == 0:
                     continue
 
+                if 'captions' not in video_group:
+                    print(
+                        f"Skipping video {id} in {data_path}: "
+                        "no captions group found."
+                    )
+                    continue
+
                 chunks_indices = list(chunked_even(range(keypoint_ds.shape[0]), aprox_chunk_length))
 
                 # TODO: dev hemendik guztiz kendu
@@ -228,6 +248,7 @@ def read_to_datasets(data_paths, caption_config, random_clip_config):
                         min_seconds=caption_config["min_seconds"],
                     )
                     avg_cap_dur = average_caption_duration(captions)
+                    caption_start_times = [caption['start_time'] for caption in captions]
 
                     for caption in captions:
 
@@ -272,6 +293,26 @@ def read_to_datasets(data_paths, caption_config, random_clip_config):
                     previous_indices = chunks_indices[0]
                     for current_indices in chunks_indices[1:]:
 
+                        chunk_start_frame = previous_indices[0]
+                        chunk_end_frame = current_indices[-1] + 1
+                        previous_indices = current_indices
+
+                        if random_clip_config.get('require_caption', False):
+                            chunk_start_time = chunk_start_frame / fps * 1000
+                            chunk_end_time = chunk_end_frame / fps * 1000
+                            first_possible_caption = bisect_left(caption_start_times, chunk_start_time)
+
+                            has_fully_contained_caption = False
+                            for caption in captions[first_possible_caption:]:
+                                if caption['start_time'] >= chunk_end_time:
+                                    break
+                                if caption['end_time'] < chunk_end_time:
+                                    has_fully_contained_caption = True
+                                    break
+
+                            if not has_fully_contained_caption:
+                                continue
+
                         instance = {
                             'instance_type': 'random_clip_slt',
                             'all_captions': captions,
@@ -279,8 +320,8 @@ def read_to_datasets(data_paths, caption_config, random_clip_config):
                             'fps': fps,
                             'width': video_group.attrs['width'],
                             'height': video_group.attrs['height'],
-                            'start_frame': previous_indices[0],
-                            'end_frame': current_indices[-1] + 1,
+                            'start_frame': chunk_start_frame,
+                            'end_frame': chunk_end_frame,
                             'src_lang': video_group.attrs['sign_lang'],
                             'tgt_lang': lang,
                             'video_id': id,
@@ -297,9 +338,6 @@ def read_to_datasets(data_paths, caption_config, random_clip_config):
                                 dev_random_synthetic.append(instance)
                             else:
                                 dev_random_real.append(instance)
-
-                        previous_indices = current_indices
-
     # TODO: dev guztiak kendu
     return (Dataset.from_list(train_caption_real), 
             Dataset.from_list(dev_caption_real),
@@ -416,9 +454,9 @@ class DataCollator:
         tokenizer, 
         model_input_dim,
         keypoint_config,
-        max_tokens,
+        max_length_config,
         random_clip_config=None,
-        pose_pad_value=0.0
+        pose_pad_value=0.0,
     ):
 
         self.data_paths = data_paths
@@ -432,15 +470,43 @@ class DataCollator:
         if random_clip_config is not None:
             self.chunk_seconds = random_clip_config['chunk_seconds']
             self.min_duration_seconds = random_clip_config['min_duration_seconds']
-        else:
-            self.chunk_seconds = None
-            self.min_duration_seconds = None
+            self.include_alignment_task = random_clip_config.get('include_alignment_task', False)
 
-        self.max_tokens = max_tokens
+        self.max_input_text_tokens = max_length_config['input_text_tokens']
+        self.max_pose_frames = max_length_config['pose_frames']
+        self.max_target_tokens = max_length_config['target_tokens']
         self.pose_pad_value = pose_pad_value
 
         self.tokenizer = tokenizer
         self.model_input_dim = model_input_dim
+
+    def _tokenize_inputs(self, input_texts):
+        original_padding_side = self.tokenizer.padding_side
+        try:
+            self.tokenizer.padding_side = 'left'
+            return self.tokenizer(
+                preserve_newlines_for_tokenizer(self.tokenizer, input_texts),
+                padding=True,
+                truncation=True,
+                max_length=self.max_input_text_tokens,
+                return_tensors='pt',
+                add_special_tokens=False
+            )
+        finally:
+            self.tokenizer.padding_side = original_padding_side
+
+    def _tokenize_targets(self, target_texts):
+        tokenized_target = self.tokenizer(
+            preserve_newlines_for_tokenizer(self.tokenizer, target_texts),
+            padding=True,
+            truncation=True,
+            max_length=self.max_target_tokens,
+            return_tensors='pt'
+        )['input_ids']
+
+        pad_token_id = self.tokenizer.pad_token_id
+        tokenized_target[tokenized_target == pad_token_id] = -100
+        return tokenized_target
 
     def _ensure_files_open(self):
 
@@ -451,7 +517,17 @@ class DataCollator:
             }
 
     def _caption_level_input_text(self, src_lang, tgt_lang):
-        return f'slt 1 src:{src_lang} tgt:{tgt_lang}\n'
+        # return f'slt 1 src:{src_lang} tgt:{tgt_lang}\n'
+        # TEST TO SEE IF THE TRAILING TOKEN IS A PROBLEM
+        return f'slt 1 src:{src_lang} tgt:{tgt_lang}'
+
+    def _avg_cap_dur_text_span(self, instance):
+        avg_cap_dur = round(instance['avg_cap_dur'] / 1000, 1)
+        return f'avg:{avg_cap_dur}'
+
+    def _left_edge_text_span(self, prev_captions, start_time):
+        left_edge = get_left_edge(prev_captions, start_time)
+        return f'start:{round(left_edge / 1000, 1)}'
 
     def _process_sentence_level_dataset_slt_instance(self, instance):
 
@@ -520,53 +596,97 @@ class DataCollator:
             instance['all_captions'], 
             start_time, 
             end_time,
-            context_seconds=self.min_duration_seconds
+            context_seconds=self.chunk_seconds
         )
 
-        input_text = 'slt'
-
-        timed = False
         guess_lang_id = False
 
-        if random.random() < 0.8:
-            # timed
-            input_text += ' timed'
-            timed = True
-            if random.random() < 0.5:
-                # avg cap dur
-                input_text += f' avg:{round(instance["avg_cap_dur"] / 1000, 1)}'
-        else:
-            # untimed
-            input_text += ' untimed'
-        # left edge
-        left_edge = get_left_edge(prev_captions, start_time)
-        input_text += f' start:{round(left_edge / 1000, 1)}'
-        if random.random() < 0.9:
-            # src/trg lang
-            input_text += f' src:{instance["src_lang"]} tgt:{instance["tgt_lang"]}'
+        if not self.include_alignment_task or random.random() < 0.96:
+            # translate
+            input_text = 'slt'
+            timed = False
+
+            if random.random() < 0.8:
+                # timed
+                input_text += ' timed'
+                timed = True
+                if random.random() < 0.5:
+                    # avg cap dur
+                    input_text += f' {self._avg_cap_dur_text_span(instance)}'
+            else:
+                # untimed
+                input_text += ' untimed'
+            # left edge
+            input_text += f' {self._left_edge_text_span(prev_captions, start_time)}'
             if random.random() < 0.9:
-                # untimed prev captions
-                input_text += '\n' + '\n'.join(caption['sentence'] for caption in prev_captions)
-                if random.random() < 0.2:
-                    # right edge
-                    right_edge = get_right_edge(next_captions, start_time, end_time)
-                    input_text += f'\nend:{round(right_edge / 1000, 1)}'
-                    # untimed next captions
-                    input_text += '\n' + '\n'.join(caption['sentence'] for caption in next_captions)
+                # src/trg lang
+                input_text += f' src:{instance["src_lang"]} tgt:{instance["tgt_lang"]}'
+                if random.random() < 0.9:
+                    # untimed prev captions
+                    input_text += '\n' + '\n'.join(caption['sentence'] for caption in prev_captions)
+                    if random.random() < 0.2:
+                        # right edge
+                        right_edge = get_right_edge(next_captions, start_time, end_time)
+                        input_text += f'\nend:{round(right_edge / 1000, 1)}'
+                        # untimed next captions
+                        input_text += '\n' + '\n'.join(caption['sentence'] for caption in next_captions)
+            else:
+                # lang id
+                input_text += ' guess_lang_id'
+                guess_lang_id = True
+
+            # TO SEE IF THE TRAILING TOKEN IS A PROBLEM
+            # input_text += '\n'
+
+            if timed:
+                target_text = get_text_with_timestamps(curr_captions, interval_start_time=start_time)
+            else:
+                target_text = '\n'.join(caption['sentence'] for caption in curr_captions)
+
+            if guess_lang_id:
+                target_text = f'{instance["src_lang"]} {instance["tgt_lang"]}\n{target_text}'
+
         else:
-            # lang id
-            input_text += ' guess_lang_id'
-            guess_lang_id = True
+            # align
+            input_text = 'align'
+            sep = '\n'
 
-        input_text += '\n'
+            if random.random() < 0.5:
+                # choose sep
+                input_text += ' choose'
+                sep = ' '
+                if random.random() < 0.5:
+                    # avg cap dur
+                    input_text += f' {self._avg_cap_dur_text_span(instance)}'
+            else:
+                # copy sep
+                input_text += ' copy'
 
-        if timed:
-            target_text = get_text_with_timestamps(curr_captions, interval_start_time=start_time)
-        else:
-            target_text = '\n'.join(caption['sentence'] for caption in curr_captions) # separazioa egotea nahi dugu?
+            input_text += f' src:{instance["src_lang"]} tgt:{instance["tgt_lang"]}'
+            # left edge
+            input_text += f' {self._left_edge_text_span(prev_captions, start_time)}'
 
-        if guess_lang_id:
-            target_text = f'{instance["src_lang"]} {instance["tgt_lang"]}\n{target_text}'
+            if random.random() < 0.8:
+                # overflow
+                alignment_input_captions = curr_captions + next_captions
+                alignment_target_captions = curr_captions
+                mode = 'overflow'
+            else:
+                # subset
+                subset_length = random.randint(0, len(curr_captions))
+                alignment_input_captions = curr_captions[:subset_length]
+                alignment_target_captions = alignment_input_captions
+                mode = 'subset'
+
+            input_text += (
+                f' {mode}\n'
+                + sep.join(caption['sentence'] for caption in alignment_input_captions)
+            )
+
+            target_text = get_text_with_timestamps(
+                alignment_target_captions,
+                interval_start_time=start_time,
+            )
 
         return input_text, pose, target_text
 
@@ -604,7 +724,7 @@ class DataCollator:
             )
 
             # PROBA
-            # pose[pose == -100] = -5
+            # pose[pose == -100] = -10
 
             input_texts.append(input_text)
             poses.append(pose)
@@ -624,43 +744,49 @@ class DataCollator:
             print()
             '''
 
-        encoded = self.tokenizer(
-            input_texts,
-            padding=True,
-            return_tensors='pt',
-            add_special_tokens=False
-        )
+        encoded = self._tokenize_inputs(input_texts)
         input_ids = encoded['input_ids']
         text_attention_mask = encoded['attention_mask']
 
         # Shape: (batch_size, max_seq_len, model_input_dim)
         padded_poses = pad_sequence(poses, batch_first=True, padding_value=self.pose_pad_value)
-        pose_attention_mask = (~torch.all(padded_poses == 0.0, dim=-1)).long()
+        # Derive padding from sequence lengths rather than feature values. In
+        # the zero-with-presence representation, a real frame in which every
+        # landmark is missing is an all-zero vector but must remain attended.
+        pose_lengths = torch.tensor(
+            [pose.shape[0] for pose in poses],
+            device=padded_poses.device,
+        )
+        pose_attention_mask = (
+            torch.arange(
+                padded_poses.shape[1],
+                device=padded_poses.device,
+            )[None, :]
+            < pose_lengths[:, None]
+        ).long()
 
-        tokenized_target = self.tokenizer(target_texts, padding=True, return_tensors="pt")["input_ids"]
-        tokenized_target[tokenized_target == self.tokenizer.pad_token_id] = -100
+        tokenized_target = self._tokenize_targets(target_texts)
 
         batch_dict = {
-            'input_ids': input_ids[:, :self.max_tokens],
-            'input_vectors': padded_poses[:, :self.max_tokens],
-            'text_attention_mask': text_attention_mask[:, :self.max_tokens],
-            'vectors_attention_mask': pose_attention_mask[:, :self.max_tokens],
-            'labels': tokenized_target[:, :self.max_tokens]
+            'input_ids': input_ids,
+            'input_vectors': padded_poses[:, :self.max_pose_frames],
+            'text_attention_mask': text_attention_mask,
+            'vectors_attention_mask': pose_attention_mask[:, :self.max_pose_frames],
+            'labels': tokenized_target
         }
 
         return batch_dict
 
 
-class DebugTextOnlyDataCollator:
+class DebugTextOnlyDataCollator(DataCollator):
     def __init__(
         self, 
         data_paths, 
         tokenizer, 
         model_input_dim,
-        keypoint_config,
-        max_tokens,
+        max_length_config,
         random_clip_config=None,
-        pose_pad_value=0.0
+        pose_pad_value=0.0,
     ):
 
         self.data_paths = data_paths
@@ -668,18 +794,15 @@ class DebugTextOnlyDataCollator:
         if random_clip_config is not None:
             self.chunk_seconds = random_clip_config['chunk_seconds']
             self.min_duration_seconds = random_clip_config['min_duration_seconds']
-        else:
-            self.chunk_seconds = None
-            self.min_duration_seconds = None
+            self.include_alignment_task = random_clip_config.get('include_alignment_task', False)
 
-        self.max_tokens = max_tokens
+        self.max_input_text_tokens = max_length_config['input_text_tokens']
+        self.max_pose_frames = max_length_config['pose_frames']
+        self.max_target_tokens = max_length_config['target_tokens']
         self.pose_pad_value = pose_pad_value
 
         self.tokenizer = tokenizer
         self.model_input_dim = model_input_dim
-
-    def _caption_level_input_text(self, src_lang, tgt_lang):
-        return f'slt 1 src:{src_lang} tgt:{tgt_lang}\n'
 
     def _process_sentence_level_dataset_slt_instance(self, instance):
         input_text = self._caption_level_input_text(instance['src_lang'], instance['tgt_lang'])
@@ -718,62 +841,96 @@ class DebugTextOnlyDataCollator:
             instance['all_captions'], 
             start_time, 
             end_time,
-            context_seconds=self.min_duration_seconds
+            context_seconds=self.chunk_seconds
         )
 
-        input_text = 'slt'
-
-        timed = False
         guess_lang_id = False
 
-        if random.random() < 0.8:
-            # timed
-            input_text += ' timed'
-            timed = True
-            if random.random() < 0.5:
-                # avg cap dur
-                input_text += f' avg:{round(instance["avg_cap_dur"] / 1000, 1)}'
-        else:
-            # untimed
-            input_text += ' untimed'
-        # left edge
-        left_edge = get_left_edge(prev_captions, start_time)
-        input_text += f' start:{round(left_edge / 1000, 1)}'
-        if random.random() < 0.9:
-            # src/trg lang
-            input_text += f' src:{instance["src_lang"]} tgt:{instance["tgt_lang"]}'
+        if not self.include_alignment_task or random.random() < 0.96:
+            # translate
+            input_text = 'slt'
+            timed = False
+
+            if random.random() < 0.8:
+                # timed
+                input_text += ' timed'
+                timed = True
+                if random.random() < 0.5:
+                    # avg cap dur
+                    input_text += f' {self._avg_cap_dur_text_span(instance)}'
+            else:
+                # untimed
+                input_text += ' untimed'
+            # left edge
+            input_text += f' {self._left_edge_text_span(prev_captions, start_time)}'
             if random.random() < 0.9:
-                # untimed prev captions
-                input_text += '\n' + '\n'.join(caption['sentence'] for caption in prev_captions)
-                if random.random() < 0.2:
-                    # right edge
-                    right_edge = get_right_edge(next_captions, start_time, end_time)
-                    input_text += f'\nend:{round(right_edge / 1000, 1)}'
-                    # untimed next captions
-                    input_text += '\n' + '\n'.join(caption['sentence'] for caption in next_captions)
-        else:
-            # lang id
-            input_text += ' guess_lang_id'
-            guess_lang_id = True
+                # src/trg lang
+                input_text += f' src:{instance["src_lang"]} tgt:{instance["tgt_lang"]}'
+                if random.random() < 0.9:
+                    # untimed prev captions
+                    input_text += '\n' + '\n'.join(caption['sentence'] for caption in prev_captions)
+                    if random.random() < 0.2:
+                        # right edge
+                        right_edge = get_right_edge(next_captions, start_time, end_time)
+                        input_text += f'\nend:{round(right_edge / 1000, 1)}'
+                        # untimed next captions
+                        input_text += '\n' + '\n'.join(caption['sentence'] for caption in next_captions)
+            else:
+                # lang id
+                input_text += ' guess_lang_id'
+                guess_lang_id = True
 
-        input_text += '\n'
+            if timed:
+                target_text = get_text_with_timestamps(curr_captions, interval_start_time=start_time)
+            else:
+                target_text = '\n'.join(caption['sentence'] for caption in curr_captions)
 
-        if timed:
-            target_text = get_text_with_timestamps(curr_captions, interval_start_time=start_time)
+            if guess_lang_id:
+                target_text = f'{instance["src_lang"]} {instance["tgt_lang"]}\n{target_text}'
+
         else:
-            target_text = '\n'.join(caption['sentence'] for caption in curr_captions) # separazioa egotea nahi dugu?
-        
-        if guess_lang_id:
-            target_text = f'{instance["src_lang"]} {instance["tgt_lang"]}\n{target_text}'
+            # align
+            input_text = 'align'
+            sep = '\n'
+
+            if random.random() < 0.5:
+                # choose sep
+                input_text += ' choose'
+                sep = ' '
+                if random.random() < 0.5:
+                    # avg cap dur
+                    input_text += f' {self._avg_cap_dur_text_span(instance)}'
+            else:
+                # copy sep
+                input_text += ' copy'
+
+            input_text += f' src:{instance["src_lang"]} tgt:{instance["tgt_lang"]}'
+            # left edge
+            input_text += f' {self._left_edge_text_span(prev_captions, start_time)}'
+
+            if random.random() < 0.8:
+                # overflow
+                alignment_input_captions = curr_captions + next_captions
+                alignment_target_captions = curr_captions
+                mode = 'overflow'
+            else:
+                # subset
+                subset_length = random.randint(0, len(curr_captions))
+                alignment_input_captions = curr_captions[:subset_length]
+                alignment_target_captions = alignment_input_captions
+                mode = 'subset'
+
+            input_text += (
+                f' {mode}\n'
+                + sep.join(caption['sentence'] for caption in alignment_input_captions)
+            )
+
+            target_text = get_text_with_timestamps(
+                alignment_target_captions,
+                interval_start_time=start_time,
+            )
 
         return input_text, target_text
-
-
-    def _process_text_mt_instance(self, instance):
-        
-        input_text = f'mt src:{instance["src_lang"]} tgt:{instance["tgt_lang"]}\n{instance["src_sentence"]}'
-
-        return input_text, instance['tgt_sentence']
 
 
     def __call__(self, batch):
@@ -813,22 +970,16 @@ class DebugTextOnlyDataCollator:
             print()
             '''
 
-        encoded = self.tokenizer(
-            input_texts,
-            padding=True,
-            return_tensors='pt',
-            add_special_tokens=False
-        )
+        encoded = self._tokenize_inputs(input_texts)
         input_ids = encoded['input_ids']
         text_attention_mask = encoded['attention_mask']
 
-        tokenized_target = self.tokenizer(target_texts, padding=True, return_tensors="pt")["input_ids"]
-        tokenized_target[tokenized_target == self.tokenizer.pad_token_id] = -100
+        tokenized_target = self._tokenize_targets(target_texts)
 
         batch_dict = {
-            'input_ids': input_ids[:, :self.max_tokens],
-            'text_attention_mask': text_attention_mask[:, :self.max_tokens],
-            'labels': tokenized_target[:, :self.max_tokens],
+            'input_ids': input_ids,
+            'text_attention_mask': text_attention_mask,
+            'labels': tokenized_target,
             'input_texts': input_texts,
             'target_texts': target_texts,
             'video_ids': [instance.get('video_id') for instance in batch],

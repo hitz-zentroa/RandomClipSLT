@@ -4,24 +4,18 @@ import fasttext
 import glob
 import h5py
 import langcodes
-import numpy as np
 import os
-import webvtt
 import yaml
 
-from bs4 import BeautifulSoup
 from huggingface_hub import hf_hub_download
 from tqdm import tqdm
 
-
-
-def clean_caption_text(caption_text):
-    return BeautifulSoup((BeautifulSoup(caption_text, 'lxml').text), 'lxml').text.replace('\n', ' ')
-
-
-def get_caption_time_ms(caption_time):
-    h, min, s, ms = caption_time.to_tuple()
-    return h * 3_600_000 + min * 60_000 + s * 1000 + ms
+from .caption_utils import (
+    caption_rows,
+    create_caption_dataset,
+    dataset_caption_rows,
+    read_caption_file
+)
 
 
 def predict_lang(lang_model, lang_reg, text):
@@ -46,25 +40,29 @@ def predict_lang(lang_model, lang_reg, text):
 def process_caption_file(path, lang_model):
 
     lang_reg = os.path.basename(path).split('.')[1]
-    
-    captions = []
 
-    for caption in webvtt.read(path):
-        
-        clean_text = clean_caption_text(caption.text)
-        start_time = get_caption_time_ms(caption.start_time)
-        end_time = get_caption_time_ms(caption.end_time)
-
-        captions.append({
-                'sentence': clean_text,
-                'start_time': start_time,
-                'end_time': end_time
-            })
+    captions = read_caption_file(path)
 
     all_text = ' '.join(caption['sentence'] for caption in captions).lower()
     predicted_lang = predict_lang(lang_model, lang_reg, all_text)
 
     return captions, predicted_lang
+
+
+def choose_caption_file(video_id, predicted_lang, existing_filename, new_filename):
+    prompt = (
+        f'\nDifferent captions were found for video ID {video_id} in language '
+        f'{predicted_lang}. Select which file to keep:\n'
+        f'  1. {existing_filename}\n'
+        f'  2. {new_filename}\n'
+        'Enter 1 or 2: '
+    )
+
+    while True:
+        choice = input(prompt).strip()
+        if choice in {'1', '2'}:
+            return choice == '2'
+        print('Invalid selection. Enter 1 or 2.')
 
 
 def main(args, config):
@@ -75,12 +73,6 @@ def main(args, config):
     )
     
     lang_model = fasttext.load_model(lang_model_path)
-
-    caption_dtype = np.dtype([
-        ('sentence', h5py.string_dtype(encoding='utf-8')),
-        ('start_time', np.int32),
-        ('end_time', np.int32)
-    ])
 
     caps_glob = glob.glob(
         os.path.join(config['data']['captions']['path'], '*')
@@ -103,6 +95,7 @@ def main(args, config):
         hdf5_path = hdf5_glob[0]
 
         rewritten_videos = set()
+        chosen_filenames = {}
 
         with h5py.File(hdf5_path, 'a') as hdf5_file:
             for caps_file_path in tqdm(caps_file_paths):
@@ -114,6 +107,7 @@ def main(args, config):
                     continue
 
                 captions, predicted_lang = process_caption_file(caps_file_path, lang_model)
+                caps_filename = os.path.basename(caps_file_path)
 
                 video_group = hdf5_file[video_id]
                 # TODO: mugitu hau hemendik extract_keypoints.py-ra
@@ -121,22 +115,56 @@ def main(args, config):
 
                 if args.rewrite and video_id not in rewritten_videos:
                     if 'captions' in video_group:
+                        if args.keep_chosen_files:
+                            chosen_filenames[video_id] = {}
+                            for lang, captions_ds in video_group['captions'].items():
+                                filename = captions_ds.attrs.get('filename')
+                                if isinstance(filename, bytes):
+                                    filename = filename.decode('utf-8')
+                                if filename is not None:
+                                    chosen_filenames[video_id][lang] = filename
                         del video_group['captions']
                     rewritten_videos.add(video_id)
 
                 captions_group = video_group.require_group('captions')
 
-                if predicted_lang in captions_group:
-                    print(f'Captions already exist for video ID {video_id} in language {predicted_lang}. Skipping.')
+                chosen_filename = chosen_filenames.get(video_id, {}).get(predicted_lang)
+                if chosen_filename is not None and caps_filename != chosen_filename:
                     continue
 
-                captions_array = np.array([(
-                    caption['sentence'], 
-                    caption['start_time'], 
-                    caption['end_time']) for caption in captions], dtype=caption_dtype)
-                
-                captions_ds = captions_group.create_dataset(predicted_lang, data=captions_array)
-                captions_ds.attrs['is_synthetic'] = False
+                if predicted_lang in captions_group:
+                    existing_captions_ds = captions_group[predicted_lang]
+
+                    if dataset_caption_rows(existing_captions_ds) == caption_rows(captions):
+                        print(
+                            f'Identical captions already exist for video ID {video_id} '
+                            f'in language {predicted_lang}. Skipping.'
+                        )
+                        continue
+
+                    existing_filename = existing_captions_ds.attrs.get(
+                        'filename', '<unknown filename>'
+                    )
+                    if isinstance(existing_filename, bytes):
+                        existing_filename = existing_filename.decode('utf-8')
+
+                    replace_existing = choose_caption_file(
+                        video_id,
+                        predicted_lang,
+                        existing_filename,
+                        caps_filename
+                    )
+                    if not replace_existing:
+                        continue
+
+                    del captions_group[predicted_lang]
+
+                create_caption_dataset(
+                    captions_group,
+                    predicted_lang,
+                    captions,
+                    filename=caps_filename
+                )
 
         new_basename = os.path.basename(hdf5_path).replace('.h5', '_caps.h5')
         new_hdf5_path = os.path.join(config['data']['hdf5_path'], sign_lang, new_basename)
@@ -148,6 +176,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Preprocess .vtt caption files.')
     parser.add_argument('--config-path', type=str, default='../configs/config.yaml')
     parser.add_argument('--rewrite', action='store_true')
+    parser.add_argument('--keep-chosen-files', action='store_true')
     args = parser.parse_args()
 
     with open(args.config_path, 'r') as file:

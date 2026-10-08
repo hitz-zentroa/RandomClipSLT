@@ -124,6 +124,8 @@ def main(args, config):
         print(f'Found {len(video_paths)} video files for sign language: {sign_lang}', flush=True)
 
         sign_lang_path = os.path.join(config['data']['hdf5_path'], sign_lang)
+        # TODO: hau aldatu. Bestela dagoeneko keypoint-ez gain beste zerbait
+        #   daukan fitxategi bat badago, izen honekin ez du aurkituko.
         h5_path = os.path.join(sign_lang_path, 'data.h5')
 
         if os.path.exists(h5_path):

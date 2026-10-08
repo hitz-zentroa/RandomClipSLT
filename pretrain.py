@@ -4,18 +4,21 @@ os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE" # TODO: kendu hemendik
 import argparse
 import dataclasses
 import glob
-import shutil
 import torch
 import yaml
 
-from data.data import read_to_datasets, load_mt_datasets, sentence_level_hdf5_to_dataset, DataCollator
+from data.data import T5_NEWLINE_TOKEN, read_to_datasets, load_mt_datasets, sentence_level_hdf5_to_dataset, DataCollator
 from data.keypoint_processing import get_processed_keypoint_dim
-from eval_utils import compute_bleu_from_token_ids
+from eval_utils import compute_bleu_from_predictions, compute_generation_metrics, get_bleu_references
+from gradient_diagnostics import (
+    GradientDiagnosticCollator,
+    GradientDiagnosticSeq2SeqTrainer,
+)
 from model import CustomByT5Model
 
 from datasets import concatenate_datasets
 from peft import LoraConfig
-from transformers import Adafactor, AutoTokenizer, Seq2SeqTrainingArguments, Seq2SeqTrainer
+from transformers import Adafactor, AutoTokenizer, Seq2SeqTrainingArguments, Seq2SeqTrainer, set_seed
 from transformers.trainer_utils import get_last_checkpoint
 
 
@@ -44,6 +47,12 @@ def main(args, config):
 
     os.environ["WANDB__SERVICE_WAIT"] = "300" # ???
 
+    seed = config['training'].get('seed', 42)
+    data_seed = config['training'].get('data_seed', seed)
+    set_seed(seed)
+    print(f'Random seed: {seed}')
+    print(f'Data seed: {data_seed}')
+
     hdf5_path = config['data']['hdf5_path']
     val_hdf5_path = config['data']['val_hdf5_path'] # TODO: hau aldatzeko dago
     caption_config = config['data']['captions']
@@ -53,7 +62,7 @@ def main(args, config):
     lora = config['model']['lora']
     save_path = config['model']['save_path']
     generation_max_length = config['generation']['max_length']
-    max_tokens = config['training']['max_tokens']
+    max_length_config = config['training']['max_lengths']
     initial_data_proportions = config['training']['initial_data_proportions']
     proportions = config['training']['data_proportions']
     target_effective_batch_size = config['training']['target_effective_batch_size']
@@ -107,27 +116,54 @@ def main(args, config):
     data_paths_dict['how2sign_val'] = val_hdf5_path
     print(f'Validation dataset loaded with {len(val_dataset)} instances.')
 
-    print('Creating MT datasets...')
-
-    mt_ds, reverse_mt_ds = load_mt_datasets(
-        config["data"]["mt_pairs"],
-        max_characters=caption_config["max_characters"]
+    use_mt = (
+        initial_data_proportions['mt'] != 0
+        or proportions['mt'] != 0
     )
+    if use_mt:
+        print('Creating MT datasets...')
+        mt_ds, reverse_mt_ds = load_mt_datasets(
+            config["data"]["mt_pairs"],
+            max_characters=caption_config["max_characters"]
+        )
+        len_mt = len(mt_ds)
+    else:
+        print('Skipping MT datasets because both MT data proportions are zero.')
+        mt_ds = reverse_mt_ds = None
+        len_mt = 0
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
+    references = get_bleu_references(val_dataset)
+
     def compute_metrics(eval_pred):
-        predictions, labels = eval_pred
+        predictions, _ = eval_pred
         if isinstance(predictions, tuple):
             predictions = predictions[0]
-        return {
-            'bleu': compute_bleu_from_token_ids(
+
+        # Distributed evaluation pads the final global batch to a multiple of
+        # the per-device batch size. In the currently installed
+        # Transformers/Accelerate versions those extra examples can reach
+        # compute_metrics, so remove them before computing corpus metrics.
+        num_validation_samples = len(val_dataset)
+        predictions = predictions[:num_validation_samples]
+
+        metrics = {
+            'bleu': compute_bleu_from_predictions(
                 predictions,
-                labels,
+                references,
                 model_name=model_name,
                 tokenizer=tokenizer
             )
         }
+        metrics.update(compute_generation_metrics(
+            predictions,
+            tokenizer=tokenizer,
+            generation_max_length=generation_max_length,
+            model_name=model_name,
+            t5_newline_token=T5_NEWLINE_TOKEN,
+        ))
+        return metrics
     
     input_dim = get_processed_keypoint_dim(keypoint_config)
     print('input_dim:', input_dim)
@@ -137,14 +173,22 @@ def main(args, config):
         tokenizer=tokenizer, 
         model_input_dim=input_dim,
         keypoint_config=keypoint_config,
-        max_tokens=max_tokens,
+        max_length_config=max_length_config,
         random_clip_config=random_clip_config
     )
+    trainer_class = Seq2SeqTrainer
+    trainer_extra_kwargs = {}
+    if args.gradient_diagnostics:
+        collator = GradientDiagnosticCollator(collator)
+        trainer_class = GradientDiagnosticSeq2SeqTrainer
+        trainer_extra_kwargs["gradient_spike_threshold"] = (
+            args.gradient_spike_threshold
+        )
 
     print('Preparing training data...')
 
-    initial_mul_caption, _ = data_multipliers(initial_data_proportions, len(mt_ds), len(train_caption_real), len(train_random_real))
-    mul_caption, mul_random = data_multipliers(proportions, len(mt_ds), len(train_caption_real), len(train_random_real))
+    initial_mul_caption, _ = data_multipliers(initial_data_proportions, len_mt, len(train_caption_real), len(train_random_real))
+    mul_caption, mul_random = data_multipliers(proportions, len_mt, len(train_caption_real), len(train_random_real))
 
     print()
     print('Multipliers:')
@@ -195,16 +239,19 @@ def main(args, config):
     else:
         lora_config = None
 
-    load_weights = not args.resume and not args.only_second
+    # Resumed runs restore model weights from a Trainer checkpoint. A fresh
+    # second-phase-only run instead loads an initial-phase checkpoint below.
+    load_weights = not args.resume_initial and not args.resume_second and not args.only_second
 
     model = CustomByT5Model(model_name=model_name, input_dim=input_dim, lora_config=lora_config, load_weights=load_weights)
 
-    optimizer = Adafactor(
-        model.parameters(),
-        lr=1e-3,
-        relative_step=False,
-        scale_parameter=False
-    )
+    def create_optimizer():
+        return Adafactor(
+            model.parameters(),
+            lr=1e-3,
+            relative_step=False,
+            scale_parameter=False
+        )
 
     world_size = int(os.environ.get('WORLD_SIZE', 1))
 
@@ -213,6 +260,8 @@ def main(args, config):
 
     training_args = Seq2SeqTrainingArguments(
         os.path.join(save_path, args.run_name),
+        seed=seed,
+        data_seed=data_seed,
         logging_steps=100,
         max_steps=max_steps,
         per_device_train_batch_size=per_device_batch_sizes['train'],
@@ -227,11 +276,11 @@ def main(args, config):
         generation_max_length=generation_max_length,
         eval_strategy='steps',
         save_strategy='steps',
-        eval_steps=2000,
-        save_steps=2000,
+        eval_steps=1000,
+        save_steps=1000,
         save_total_limit=2, # bestela bukaeran azkena borratzen du
         metric_for_best_model='eval_bleu',
-        #report_to='wandb', # jarri gabe ere egiten du
+        report_to='wandb',
         run_name=args.run_name,
         #prediction_loss_only=True,
         #fp16=True,
@@ -246,50 +295,72 @@ def main(args, config):
         initial_gradient_accumulation_steps = target_effective_batch_size // (initial_per_device_batch_sizes['train'] * world_size)
         print(f'Initial gradient accumulation steps: {initial_gradient_accumulation_steps} (target effective batch size: {target_effective_batch_size}, initial per device batch size: {initial_per_device_batch_sizes["train"]}, world size: {world_size})')
 
-        # TODO: run_name=args.run_name+'_initial'? Bestela wandb-n grafikoak arraro agertuko dira dena segidan exekutatzean
         initial_training_args = dataclasses.replace(
             training_args,
             output_dir=os.path.join(save_path, args.run_name+'_initial'),
+            run_name=args.run_name+'_initial',
             per_device_train_batch_size=initial_per_device_batch_sizes['train'],
             per_device_eval_batch_size=initial_per_device_batch_sizes['eval'],
             gradient_accumulation_steps=initial_gradient_accumulation_steps,
-            max_steps=initial_max_steps,
+            max_steps=(
+                args.gradient_diagnostics_max_steps
+                if args.gradient_diagnostics_max_steps is not None
+                else initial_max_steps
+            ),
+            eval_steps=2000,
+            save_steps=2000,
         )
 
-        initial_trainer = Seq2SeqTrainer(
+        initial_optimizer = create_optimizer()
+
+        initial_trainer = trainer_class(
             model=model,
             args=initial_training_args,
             train_dataset=initial_train,
             eval_dataset=val_dataset, #dev_caption_real,
             data_collator=collator,
-            optimizers=(optimizer, None),
-            compute_metrics=compute_metrics
-    )
-
-        initial_trainer.train(resume_from_checkpoint=args.resume)
-
-        shutil.copytree(
-            src=os.path.join(save_path, args.run_name),
-            dst=os.path.join(save_path, f'{args.run_name}_initial')
+            optimizers=(initial_optimizer, None),
+            compute_metrics=compute_metrics,
+            **trainer_extra_kwargs,
         )
 
-    if args.only_second and not args.resume:
-        last_checkpoint = get_last_checkpoint(os.path.join(save_path, args.run_name+'_initial'))
-        model.load_state_dict(torch.load(os.path.join(last_checkpoint, 'pytorch_model.bin')))
+        initial_trainer.train(resume_from_checkpoint=args.resume_initial)
+
+        if not args.only_initial and initial_trainer.is_world_process_zero() and 'wandb' in initial_training_args.report_to:
+            import wandb
+            wandb.finish()
+
+    if args.only_second and not args.resume_second:
+        if args.checkpoint_path is not None:
+            checkpoint_path = args.checkpoint_path
+        else:
+            last_checkpoint = get_last_checkpoint(os.path.join(save_path, args.run_name+'_initial'))
+            checkpoint_path = os.path.join(last_checkpoint, 'pytorch_model.bin')
+        model.load_state_dict(torch.load(checkpoint_path))
 
     if not args.only_initial:
 
-        trainer = Seq2SeqTrainer(
+        # The second phase intentionally starts with fresh optimizer and
+        # scheduler state, whether it follows the initial phase in this
+        # execution or is launched separately with --only-second. When
+        # --resume-second is used, Trainer restores the second-phase states
+        # from its checkpoint into these newly created objects.
+        if not args.resume_second:
+            set_seed(seed)
+        second_optimizer = create_optimizer()
+
+        trainer = trainer_class(
             model=model,
             args=training_args,
             train_dataset=train,
             eval_dataset=val_dataset, #{'caption': dev_caption_real, 'random': dev_random_real},
             data_collator=collator,
-            optimizers=(optimizer, None),
-            compute_metrics=compute_metrics
+            optimizers=(second_optimizer, None),
+            compute_metrics=compute_metrics,
+            **trainer_extra_kwargs,
         )
 
-        trainer.train(resume_from_checkpoint=args.resume)
+        trainer.train(resume_from_checkpoint=args.resume_second)
 
 
 if __name__ == '__main__':
@@ -299,8 +370,32 @@ if __name__ == '__main__':
     parser.add_argument('--config-path', type=str, default='configs/config.yaml')
     parser.add_argument('--only-initial', action='store_true')
     parser.add_argument('--only-second', action='store_true')
-    parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--checkpoint-path', type=str)
+    parser.add_argument('--resume-initial', action='store_true')
+    parser.add_argument('--resume-second', action='store_true')
+    parser.add_argument('--gradient-diagnostics', action='store_true')
+    parser.add_argument('--gradient-spike-threshold', type=float, default=5.0)
+    parser.add_argument('--gradient-diagnostics-max-steps', type=int)
     args = parser.parse_args()
+
+    if args.only_initial and args.only_second:
+        parser.error('--only-initial and --only-second cannot be used together')
+    if args.resume_initial and args.only_second:
+        parser.error('--resume-initial cannot be used with --only-second')
+    if args.resume_second and not args.only_second:
+        parser.error('--resume-second must be used with --only-second')
+    if args.checkpoint_path is not None and not args.only_second:
+        parser.error('--checkpoint-path must be used with --only-second')
+    if args.checkpoint_path is not None and args.resume_second:
+        parser.error('--checkpoint-path cannot be used with --resume-second')
+    if (
+        args.gradient_diagnostics_max_steps is not None
+        and not args.gradient_diagnostics
+    ):
+        parser.error(
+            '--gradient-diagnostics-max-steps requires '
+            '--gradient-diagnostics'
+        )
 
     print(args)
 

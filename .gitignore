@@ -6,3 +6,5 @@ __pycache__/
 .vscode/
 configs/config_*.yaml
 AGENTS.md
+run_list.md
+data/SENTENCE_DATASETS.md
