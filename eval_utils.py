@@ -62,14 +62,16 @@ def get_bleu_references(dataset):
     return [text.replace('\n', ' ') for text in dataset['tgt_sentence']]
 
 
-def score_bleu(predictions, references):
+def score_bleu(predictions, references, metric=None):
     """Return the full SacreBLEU result, rejecting incomplete prediction sets."""
     if len(predictions) != len(references):
         raise ValueError(
             f'Prediction/reference count mismatch: {len(predictions)} predictions '
             f'for {len(references)} references.'
         )
-    return BLEU().corpus_score(predictions, [references])
+    if metric is None:
+        metric = BLEU()
+    return metric.corpus_score(predictions, [references])
 
 
 def compute_bleu_from_predictions(predictions, references, model_name=None, tokenizer=None):

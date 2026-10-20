@@ -1,16 +1,26 @@
 data:
-  hdf5_path: /path/to/the/directory
-  val_hdf5_path: /path/to/the/file.hdf5
-  how2sign:
-    path: /path/to/the/directory
+  pretraining:
+    hdf5_path: /path/to/youtube/keypoints
+    videos:
+      path: /path/to/youtube/videos # Source videos for keypoint extraction
+    validation:
+      dataset: how2sign
+      protocol: default
+      split: val
+      tgt_lang: en
+  datasets:
+    how2sign:
+      root: /path/to/How2Sign
+    lse_health:
+      root: /path/to/LSE-Health
+    flores_lse:
+      root: /path/to/FLORES-LSE
   captions:
     path: /path/to/the/directory
     max_characters: 200
     max_seconds: 20
     min_seconds: 0.5
     langs: null # null to include all languages
-  videos:
-    path: /path/to/the/directory
   keypoints:
     frame_freq: 2
     mediapipe_model_complexity: 1

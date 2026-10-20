@@ -1,9 +1,12 @@
 import argparse
 import os
+import json
 import torch
 import yaml
 
-from data.data import T5_NEWLINE_TOKEN, sentence_level_hdf5_to_dataset, DataCollator
+from data.data import T5_NEWLINE_TOKEN, DataCollator
+from data.sentence_datasets import (DATASETS, dataset_path, protocol_name,
+                                    selection_key, load_sentence_dataset)
 from data.keypoint_processing import get_processed_keypoint_dim
 from eval_utils import compute_bleu_from_predictions, compute_generation_metrics, get_bleu_references
 from model import CustomByT5Model
@@ -11,7 +14,7 @@ from model import CustomByT5Model
 from transformers import Seq2SeqTrainingArguments, Seq2SeqTrainer, AutoTokenizer, Adafactor, set_seed
 
 
-def finetune_how2sign(args, config):
+def finetune(args, config):
 
     seed = config['training'].get('seed', 42)
     set_seed(seed)
@@ -19,13 +22,8 @@ def finetune_how2sign(args, config):
 
     model_name = config['model']['model_name']
     save_path = config['model']['save_path']
-    # TODO: dataset desberdinetan doitzeko aukera ematean aldatu
-    h5_path = os.path.join(
-        config['data']['how2sign']['path'],
-        'hdf5',
-        'train.h5'
-    )
-    val_hdf5_path = config['data']['val_hdf5_path'] # TODO: hau ere aldatzeko
+    h5_path = dataset_path(config, args.dataset)
+    protocol = protocol_name(args.dataset, args.split_protocol)
     keypoint_config = config['data']['keypoints']
     generation_max_length = config['generation']['max_length']
     max_length_config = config['training']['max_lengths']
@@ -34,28 +32,37 @@ def finetune_how2sign(args, config):
     lr = config['training']['finetune_lr']
     max_steps = config['training']['finetune_max_steps']
 
-    train_ds = sentence_level_hdf5_to_dataset(
-        h5_path, 
-        dataset_name='how2sign_train', 
-        src_lang='ase', 
-        tgt_lang='en'
+    train_ds, train_manifest, train_metadata = load_sentence_dataset(
+        h5_path, args.dataset, args.train_split, args.tgt_lang, protocol,
     )
 
     print(f'Training dataset loaded with {len(train_ds)} instances.')
 
-    val_ds = sentence_level_hdf5_to_dataset(
-        val_hdf5_path,
-        dataset_name='how2sign_val',
-        src_lang='ase',
-        tgt_lang='en'
+    val_ds, val_manifest, val_metadata = load_sentence_dataset(
+        h5_path, args.dataset, args.val_split, args.tgt_lang, protocol,
     )
 
     print(f'Validation dataset loaded with {len(val_ds)} instances.')
 
-    data_paths_dict = {
-        'how2sign_train': h5_path,
-        'how2sign_val': val_hdf5_path
-    }
+    if set(train_ds['sentence_id']) & set(val_ds['sentence_id']):
+        raise ValueError('Training and validation contain overlapping sentences.')
+    data_paths_dict = {selection_key(args.dataset, protocol, part): h5_path
+                       for part in (args.train_split, args.val_split)}
+    selection = {'dataset': args.dataset, 'protocol': protocol,
+                 'tgt_lang': train_ds[0]['tgt_lang'], 'hdf5_path': h5_path,
+                 'train': train_manifest, 'validation': val_manifest,
+                 'train_metadata': train_metadata, 'validation_metadata': val_metadata,
+                 'checkpoint_path': args.checkpoint_path, 'config': config}
+    run_dir = os.path.join(save_path, args.run_name)
+    selection_path = os.path.join(run_dir, 'data_selection.json')
+    if args.resume:
+        with open(selection_path, encoding='utf-8') as file:
+            if json.load(file) != selection:
+                raise ValueError('Resume configuration/data selection differs from the saved run.')
+    elif int(os.environ.get('RANK', 0)) == 0:
+        os.makedirs(run_dir, exist_ok=True)
+        with open(selection_path, 'x', encoding='utf-8') as file:
+            json.dump(selection, file, ensure_ascii=False, indent=2)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -102,7 +109,7 @@ def finetune_how2sign(args, config):
     )
 
     model = CustomByT5Model(model_name=model_name, input_dim=input_dim, load_weights=False)
-    model.load_state_dict(torch.load(args.checkpoint_path))
+    model.load_state_dict(torch.load(args.checkpoint_path, map_location='cpu'))
 
     optimizer = Adafactor(
         model.parameters(),
@@ -112,6 +119,8 @@ def finetune_how2sign(args, config):
     )
 
     world_size = int(os.environ.get('WORLD_SIZE', 1))
+    if target_effective_batch_size < per_device_batch_sizes['train'] * world_size or target_effective_batch_size % (per_device_batch_sizes['train'] * world_size):
+        raise ValueError('Effective batch size must be a positive multiple of the global microbatch size.')
     gradient_accumulation_steps = target_effective_batch_size // (per_device_batch_sizes['train'] * world_size)
     print(f'Gradient accumulation steps: {gradient_accumulation_steps} (target effective batch size: {target_effective_batch_size}, per device batch size: {per_device_batch_sizes["train"]}, world size: {world_size})')
 
@@ -119,7 +128,7 @@ def finetune_how2sign(args, config):
         output_dir=os.path.join(save_path, args.run_name),
         run_name=args.run_name,
         seed=seed,
-        data_seed=seed,
+        data_seed=config['training'].get('data_seed', seed),
         logging_steps=50, # default 500. Kendu?
         max_steps=max_steps,
         per_device_train_batch_size=per_device_batch_sizes['train'],
@@ -138,6 +147,7 @@ def finetune_how2sign(args, config):
         metric_for_best_model='eval_bleu',
         predict_with_generate=True,
         generation_max_length=generation_max_length,
+        generation_num_beams=1,
         bf16=True,
         remove_unused_columns=False,
         save_safetensors=False,
@@ -164,6 +174,11 @@ if __name__ == '__main__':
     parser.add_argument('--config-path', type=str, default='configs/config.yaml')
     parser.add_argument('--checkpoint-path', type=str, required=True)
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--dataset', default='how2sign', choices=DATASETS)
+    parser.add_argument('--split-protocol')
+    parser.add_argument('--train-split', default='train')
+    parser.add_argument('--val-split', default='val')
+    parser.add_argument('--tgt-lang')
     args = parser.parse_args()
 
     print(args)
@@ -173,4 +188,4 @@ if __name__ == '__main__':
 
     print(config)
 
-    finetune_how2sign(args, config)
+    finetune(args, config)

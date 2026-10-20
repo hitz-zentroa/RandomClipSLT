@@ -85,7 +85,7 @@ def main(args, config):
         print(f'Found {len(caps_file_paths)} caption files for sign language: {sign_lang}')
 
         hdf5_glob = glob.glob(
-            os.path.join(config['data']['hdf5_path'], sign_lang, '*.h5')
+            os.path.join(config['data']['pretraining']['hdf5_path'], sign_lang, '*.h5')
         )
 
         if not hdf5_glob:
@@ -167,7 +167,7 @@ def main(args, config):
                 )
 
         new_basename = os.path.basename(hdf5_path).replace('.h5', '_caps.h5')
-        new_hdf5_path = os.path.join(config['data']['hdf5_path'], sign_lang, new_basename)
+        new_hdf5_path = os.path.join(config['data']['pretraining']['hdf5_path'], sign_lang, new_basename)
         os.rename(hdf5_path, new_hdf5_path)
 
 

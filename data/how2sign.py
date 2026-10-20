@@ -1,14 +1,18 @@
 """How2Sign sentence metadata (times in seconds)."""
 
-from pathlib import Path
-
 import pandas as pd
+from data.dataset_paths import resolve_path
 
 
 def load_segments(args, config):
-    root = Path(config['data']['how2sign']['path'])
-    csv_path = Path(args.csv_path) if args.csv_path else root / f'how2sign_realigned_{args.split}.csv'
-    video_dir = Path(args.video_dir) if args.video_dir else root / f'{args.split}_raw_videos'
+    csv_path = resolve_path(
+        config, 'how2sign', 'annotations_path', f'how2sign_realigned_{args.split}.csv',
+        args.csv_path, split=args.split, must_exist=True,
+    )
+    video_dir = resolve_path(
+        config, 'how2sign', 'video_dir', f'{args.split}_raw_videos',
+        args.video_dir, split=args.split,
+    )
     frame = pd.read_csv(csv_path, sep='\t')
     records = []
     for index, row in frame.iterrows():

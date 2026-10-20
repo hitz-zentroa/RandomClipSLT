@@ -34,7 +34,7 @@ def add_gloss_caption_file(caption_filename, sign_lang, config):
     if not os.path.isfile(captions_path):
         raise FileNotFoundError(f'Caption file not found: {captions_path}')
 
-    hdf5_path = find_hdf5_path(config['data']['hdf5_path'], sign_lang)
+    hdf5_path = find_hdf5_path(config['data']['pretraining']['hdf5_path'], sign_lang)
     video_id = os.path.basename(caption_filename).split('.')[0]
     target_lang = f'{sign_lang}_gloss'
 

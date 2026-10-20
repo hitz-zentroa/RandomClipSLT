@@ -8,3 +8,4 @@ configs/config_*.yaml
 AGENTS.md
 run_list.md
 data/SENTENCE_DATASETS.md
+data/migrate_sentence_datasets.py

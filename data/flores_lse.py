@@ -11,8 +11,12 @@ LANGUAGES = ('en', 'es', 'ca', 'eu', 'gl')
 def load_segments(args, config):
     from huggingface_hub import HfApi, hf_hub_download
 
-    revision = HfApi().dataset_info(REPO_ID).sha
-    metadata = hf_hub_download(repo_id=REPO_ID, repo_type='dataset',
+    settings = config['data']['datasets']['flores_lse']
+    repo_id = settings.get('repo_id', REPO_ID)
+    revision = getattr(args, 'resolved_revision', None)
+    if revision is None:
+        revision = HfApi().dataset_info(repo_id, revision=settings.get('revision')).sha
+    metadata = hf_hub_download(repo_id=repo_id, repo_type='dataset',
                                filename=f'{args.split}/metadata.csv', revision=revision)
     with open(metadata, newline='', encoding='utf-8-sig') as file:
         reader = csv.DictReader(file)
@@ -31,7 +35,7 @@ def load_segments(args, config):
             'attrs': {'file_name': row['file_name'], 'flores_id': int(row['flores_id']),
                       **{f'text_{lang}': row[f'text_{lang}'] for lang in LANGUAGES}},
         })
-    return records, {'repo_id': REPO_ID, 'revision': revision}
+    return records, {'repo_id': repo_id, 'revision': revision}
 
 
 def resolve_video(filename, metadata):

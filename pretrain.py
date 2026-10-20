@@ -7,7 +7,8 @@ import glob
 import torch
 import yaml
 
-from data.data import T5_NEWLINE_TOKEN, read_to_datasets, load_mt_datasets, sentence_level_hdf5_to_dataset, DataCollator
+from data.data import T5_NEWLINE_TOKEN, read_to_datasets, load_mt_datasets, DataCollator
+from data.sentence_datasets import load_pretraining_validation
 from data.keypoint_processing import get_processed_keypoint_dim
 from eval_utils import compute_bleu_from_predictions, compute_generation_metrics, get_bleu_references
 from gradient_diagnostics import (
@@ -53,8 +54,7 @@ def main(args, config):
     print(f'Random seed: {seed}')
     print(f'Data seed: {data_seed}')
 
-    hdf5_path = config['data']['hdf5_path']
-    val_hdf5_path = config['data']['val_hdf5_path'] # TODO: hau aldatzeko dago
+    hdf5_path = config['data']['pretraining']['hdf5_path']
     caption_config = config['data']['captions']
     keypoint_config = config['data']['keypoints']
     random_clip_config = config['data']['random_clips']
@@ -106,14 +106,8 @@ def main(args, config):
     print(f'dev_random_real: {len(dev_random_real)} instances')
     print()
 
-    # TODO: config-etik hartu zein izango den dataseta eta hortik hartu ezaugarriak
-    val_dataset = sentence_level_hdf5_to_dataset(
-        val_hdf5_path, 
-        dataset_name='how2sign_val', 
-        src_lang='ase', 
-        tgt_lang='en'
-    )
-    data_paths_dict['how2sign_val'] = val_hdf5_path
+    val_dataset, validation_paths = load_pretraining_validation(config)
+    data_paths_dict.update(validation_paths)
     print(f'Validation dataset loaded with {len(val_dataset)} instances.')
 
     use_mt = (

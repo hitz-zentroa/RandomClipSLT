@@ -7,6 +7,7 @@ import mediapipe as mp
 import numpy as np
 import os
 import time
+import warnings
 import yaml
 
 from functools import partial
@@ -110,7 +111,7 @@ def main(args, config):
     model_complexity = config['data']['keypoints']['mediapipe_model_complexity']
 
     videos_glob = glob.glob(
-        os.path.join(config['data']['videos']['path'], '*')
+        os.path.join(config['data']['pretraining']['videos']['path'], '*')
     )
 
     for videos_path in videos_glob:
@@ -123,25 +124,49 @@ def main(args, config):
         
         print(f'Found {len(video_paths)} video files for sign language: {sign_lang}', flush=True)
 
-        sign_lang_path = os.path.join(config['data']['hdf5_path'], sign_lang)
+        sign_lang_path = os.path.join(config['data']['pretraining']['hdf5_path'], sign_lang)
         # TODO: hau aldatu. Bestela dagoeneko keypoint-ez gain beste zerbait
         #   daukan fitxategi bat badago, izen honekin ez du aurkituko.
         h5_path = os.path.join(sign_lang_path, 'data.h5')
+        new_file = not os.path.exists(h5_path)
 
-        if os.path.exists(h5_path):
+        if not new_file:
 
             existing_ids = set()
 
             with h5py.File(h5_path, 'r') as f:
+                recorded_complexity = f.attrs.get('mediapipe_model_complexity')
+                if recorded_complexity is not None and recorded_complexity != model_complexity:
+                    raise ValueError(
+                        f'{h5_path}: MediaPipe model complexity is {recorded_complexity}, '
+                        f'but the current config requests {model_complexity}.'
+                    )
+                recorded_version = f.attrs.get('mediapipe_version')
                 for id, video_group in f.items():
                     if isinstance(video_group, h5py.Group) and 'keypoints' in video_group:
                         existing_ids.add(id)
 
             video_paths = [video_path for video_path in video_paths if video_id(video_path) not in existing_ids]
             print(f'Resuming. Found keypoints for {len(existing_ids)} videos for sign language: {sign_lang}. Remaining videos: {len(video_paths)}', flush=True)
+            if video_paths and recorded_version is not None and recorded_version != mp.__version__:
+                warnings.warn(
+                    f'{h5_path}: recorded MediaPipe version is {recorded_version}; '
+                    f'adding keypoints with {mp.__version__}. The recorded version is unchanged.',
+                    UserWarning,
+                )
+
+        if not video_paths:
+            continue
 
         if not os.path.exists(sign_lang_path):
             os.makedirs(sign_lang_path)
+
+        # Close the file before starting workers so they do not inherit its handle.
+        # Existing files without metadata deliberately remain without it.
+        if new_file:
+            with h5py.File(h5_path, 'x') as f:
+                f.attrs['mediapipe_model_complexity'] = model_complexity
+                f.attrs['mediapipe_version'] = mp.__version__
 
         partial_process_video = partial(process_video, model_complexity=model_complexity)
 

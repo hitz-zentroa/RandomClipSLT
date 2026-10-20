@@ -8,7 +8,8 @@ import yaml
 
 from data.data import T5_NEWLINE_TOKEN, DataCollator
 from data.keypoint_processing import get_processed_keypoint_dim
-from data.sentence_datasets import DATASETS, dataset_options, load_evaluation_dataset
+from data.sentence_datasets import (DATASETS, dataset_options, load_sentence_dataset,
+                                    dataset_path, protocol_name, selection_key)
 from sacrebleu.metrics import BLEU
 from eval_utils import (
     compute_bleu_from_predictions,
@@ -23,6 +24,10 @@ from transformers import AutoTokenizer, Seq2SeqTrainer, Seq2SeqTrainingArguments
 
 
 DEFAULT_EVAL_BATCH_SIZE = 64
+MANIFEST_FIELDS = (
+    'sentence_id', 'video_id', 'file_name', 'flores_id',
+    'source_row', 'start_time', 'end_time',
+)
 
 
 def prediction_array(prediction_output, tokenizer, num_samples=None):
@@ -51,14 +56,9 @@ def main(args, config):
         generation_num_beams = config['generation']['beam_size']
     max_length_config = config['training']['max_lengths']
     src_lang, tgt_lang = dataset_options(args.dataset, args.split, args.tgt_lang)
-    dataset_name = f'{args.dataset}_{args.split}'
-    if args.dataset != 'how2sign' and not args.h5_path:
-        raise ValueError('--h5-path is required for LSE-Health and FLORES-LSE.')
-    h5_path = args.h5_path or os.path.join(
-        config['data']['how2sign']['path'],
-        'hdf5',
-        f'{args.split}.h5',
-    )
+    protocol = protocol_name(args.dataset, args.split_protocol)
+    dataset_name = selection_key(args.dataset, protocol, args.split)
+    h5_path = dataset_path(config, args.dataset, args.h5_path)
 
     os.makedirs(args.output_path, exist_ok=True)
 
@@ -66,8 +66,8 @@ def main(args, config):
     input_dim = get_processed_keypoint_dim(keypoint_config)
     print('input_dim:', input_dim)
 
-    dataset, manifest, extraction_metadata = load_evaluation_dataset(
-        h5_path, args.dataset, args.split, tgt_lang,
+    dataset, manifest, extraction_metadata = load_sentence_dataset(
+        h5_path, args.dataset, args.split, tgt_lang, protocol,
     )
     data_paths = {dataset_name: h5_path}
     collator = DataCollator(
@@ -159,36 +159,47 @@ def main(args, config):
     out = decode_token_ids(predictions, model_name=model_name, tokenizer=tokenizer)
     ref = references
 
-    bleu_score = score_bleu(out, ref)
+    metric = BLEU()
+    bleu_score = score_bleu(out, ref, metric=metric)
+    if len(manifest) != len(out):
+        raise ValueError(
+            f'Manifest/prediction count mismatch: {len(manifest)} records '
+            f'for {len(out)} predictions.'
+        )
 
     print(bleu_score)
     print(prediction_output.metrics)
 
-    with open(os.path.join(args.output_path, 'ref.txt'), 'w') as f:
+    with open(os.path.join(args.output_path, 'ref.txt'), 'w', encoding='utf-8') as f:
         f.write('\n'.join(ref) + '\n')
 
-    with open(os.path.join(args.output_path, 'out.txt'), 'w') as f:
+    with open(os.path.join(args.output_path, 'out.txt'), 'w', encoding='utf-8') as f:
         f.write('\n'.join(out) + '\n')
 
-    with open(os.path.join(args.output_path, 'bleu.txt'), 'w') as f:
-        print(bleu_score, file=f)
-        print(prediction_output.metrics, file=f)
-
-    metric = BLEU()
-    metric.corpus_score(out, [ref])
     with open(os.path.join(args.output_path, 'manifest.jsonl'), 'w', encoding='utf-8') as f:
         for row, reference, prediction in zip(manifest, ref, out):
-            f.write(json.dumps({**row, 'reference': reference, 'prediction': prediction},
+            sentence_metadata = {key: row[key] for key in MANIFEST_FIELDS if key in row}
+            f.write(json.dumps({**sentence_metadata, 'reference': reference, 'prediction': prediction},
                                ensure_ascii=False) + '\n')
     with open(os.path.join(args.output_path, 'evaluation.json'), 'w', encoding='utf-8') as f:
         json.dump({
-            'dataset': args.dataset, 'split': args.split, 'h5_path': h5_path,
+            'dataset': args.dataset, 'protocol': protocol, 'split': args.split, 'h5_path': h5_path,
             'src_lang': src_lang, 'tgt_lang': tgt_lang,
             'checkpoint_path': args.checkpoint_path, 'config': config,
             'generation_max_length': generation_max_length,
             'generation_num_beams': generation_num_beams,
             'per_device_eval_batch_size': eval_batch_size,
-            'bleu_signature': str(metric.get_signature()),
+            'bleu': {
+                'score': bleu_score.score,
+                'signature': str(metric.get_signature()),
+                'ngram_precisions': bleu_score.precisions,
+                'ngram_matches': bleu_score.counts,
+                'ngram_totals': bleu_score.totals,
+                'brevity_penalty': bleu_score.bp,
+                'length_ratio': bleu_score.ratio,
+                'prediction_length': bleu_score.sys_len,
+                'reference_length': bleu_score.ref_len,
+            },
             'extraction_metadata': extraction_metadata,
             'metrics': prediction_output.metrics,
         }, f, ensure_ascii=False, indent=2)
@@ -200,10 +211,11 @@ if __name__ == '__main__':
     parser.add_argument('--output-path', type=str, default='outputs/default/')
     parser.add_argument('--checkpoint-path', type=str, required=True)
     parser.add_argument('--dataset', default='how2sign', choices=DATASETS)
-    parser.add_argument('--h5-path', help='Required except for the default How2Sign path.')
+    parser.add_argument('--split-protocol')
+    parser.add_argument('--h5-path', help='Override the configured dataset file.')
     parser.add_argument('--tgt-lang', help='Default: en for How2Sign/FLORES-LSE; es for LSE-Health.')
     parser.add_argument('--split', type=str, required=True,
-                        help='How2Sign/LSE-Health: val or test; FLORES-LSE: dev or devtest.')
+                        help='Partition in the selected protocol (e.g. val, test, devtest).')
     parser.add_argument(
         '--eval-batch-size',
         type=int,
