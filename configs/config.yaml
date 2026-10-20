@@ -14,7 +14,7 @@ data:
     lse_health:
       root: /path/to/LSE-Health
     flores_lse:
-      root: /path/to/FLORES-LSE
+      keypoints: /path/to/FLORES-LSE/hdf5/keypoints.h5 # Source metadata and videos are downloaded from Hugging Face
   captions:
     path: /path/to/the/directory
     max_characters: 200

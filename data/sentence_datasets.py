@@ -27,7 +27,9 @@ def dataset_options(name, split, target=None):
 
 
 def dataset_path(config, name, override=None):
-    return str(resolve_path(config, name, 'hdf5_path', 'hdf5/keypoints.h5', override))
+    settings = config['data']['datasets'][name]
+    key = 'keypoints' if settings.get('keypoints') else 'hdf5_path'
+    return str(resolve_path(config, name, key, 'hdf5/keypoints.h5', override))
 
 
 def selection_key(name, protocol, split):
@@ -92,9 +94,10 @@ def write_partitions(file, records, provenance):
 def load_sentence_dataset(path, name, split, target=None, protocol=None):
     from datasets import Dataset
     if not Path(path).is_file():
+        setting = 'keypoints' if name == 'flores_lse' else 'hdf5_path'
         raise FileNotFoundError(
             f'Missing consolidated dataset: {path}. Extract or migrate keypoints first, '
-            f'or override data.datasets.{name}.hdf5_path.'
+            f'or override data.datasets.{name}.{setting}.'
         )
     source, target = dataset_options(name, split, target)
     protocol = protocol_name(name, protocol)
