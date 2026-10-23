@@ -211,11 +211,11 @@ if __name__ == '__main__':
     parser.add_argument('--output-path', type=str, default='outputs/default/')
     parser.add_argument('--checkpoint-path', type=str, required=True)
     parser.add_argument('--dataset', default='how2sign', choices=DATASETS)
-    parser.add_argument('--split-protocol')
+    parser.add_argument('--split-protocol', help='FLORES-LSE: zs (default), si, sd; LSE-Health: sd_td (default), sd_ti, si_ti.')
     parser.add_argument('--h5-path', help='Override the configured dataset file.')
     parser.add_argument('--tgt-lang', help='Default: en for How2Sign/FLORES-LSE; es for LSE-Health.')
     parser.add_argument('--split', type=str, required=True,
-                        help='Partition in the selected protocol (e.g. val, test, devtest).')
+                        help='Partition in the selected protocol (e.g. val, test).')
     parser.add_argument(
         '--eval-batch-size',
         type=int,

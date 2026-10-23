@@ -15,6 +15,7 @@ data:
       root: /path/to/LSE-Health
     flores_lse:
       keypoints: /path/to/FLORES-LSE/hdf5/keypoints.h5 # Source metadata and videos are downloaded from Hugging Face
+      repo_id: HiTZ/flores-lse
   captions:
     path: /path/to/the/directory
     max_characters: 200
@@ -75,3 +76,8 @@ training:
   initial_max_steps: 200000
   max_steps: 200000
   finetune_max_steps: 6000
+  finetune_eval_steps: 150
+  finetune_dataset_overrides:
+    flores_lse:
+      max_steps: 500
+      eval_steps: 25

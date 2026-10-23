@@ -8,7 +8,6 @@ import argparse
 from collections import defaultdict
 from functools import partial
 import math
-import json
 import warnings
 from multiprocessing import get_context
 from pathlib import Path
@@ -31,8 +30,7 @@ def process_video(task, model_complexity, dataset, metadata):
     video_path, segments = task
     if dataset == 'flores_lse':
         from data.flores_lse import resolve_video
-        sources = json.loads(metadata['sources_json'])
-        video_path = resolve_video(video_path, sources[segments[0]['memberships']['default']])
+        video_path = resolve_video(video_path, metadata)
     probe = ffmpegio.probe.video_streams_basic(video_path)[0]
     cap = cv2.VideoCapture(video_path)
     results = []
@@ -82,7 +80,7 @@ def main(args, config):
         raise ValueError('No segments selected.')
     videos = defaultdict(list)
     ids = set()
-    for order, record in enumerate(records):
+    for record in records:
         sentence_id = record['id']
         if not isinstance(sentence_id, str) or not sentence_id or '/' in sentence_id or sentence_id in ids:
             raise ValueError(f'Invalid or duplicate sentence ID: {sentence_id!r}')
@@ -96,12 +94,11 @@ def main(args, config):
             if key == 'sentence' or key.startswith('text_'):
                 if not isinstance(value, str) or not value.strip():
                     raise ValueError(f'{sentence_id}: missing {key}.')
-        record['attrs']['order'] = order
         videos[record['video_path']].append(record)
+    output = Path(dataset_path(config, args.dataset, args.h5_path))
     complexity = config['data']['keypoints']['mediapipe_model_complexity']
     worker = partial(process_video, model_complexity=complexity,
                      dataset=args.dataset, metadata=metadata)
-    output = Path(dataset_path(config, args.dataset, args.h5_path))
     output.parent.mkdir(parents=True, exist_ok=True)
     new_file = not output.exists()
     print(f'Found {len(records)} sentences from {len(videos)} videos.', flush=True)
@@ -124,10 +121,7 @@ def main(args, config):
             if sid in sentences and sentences[sid].attrs.get('complete', False):
                 group = sentences[sid]
                 for key, value in record['attrs'].items():
-                    if key == 'source_provenance_json' and key not in group.attrs:
-                        # Legacy FLORES files did not record a resolved HF revision.
-                        continue
-                    if key != 'order' and group.attrs.get(key) != value:
+                    if group.attrs.get(key) != value:
                         raise ValueError(f'{sid}: metadata mismatch for {key}.')
                 for key in ('start_time', 'end_time'):
                     if record[key] is not None and group.attrs.get(key) != record[key]:
@@ -178,7 +172,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dataset', required=True, choices=DATASETS)
     parser.add_argument('--split', default='all')
-    parser.add_argument('--split-protocol')
+    parser.add_argument('--split-protocol', help='FLORES-LSE: zs (default), si, sd; LSE-Health: sd_td (default), sd_ti, si_ti.')
     parser.add_argument('--h5-path', help='Override the configured output path.')
     parser.add_argument('--config-path', default='configs/config.yaml')
     parser.add_argument('--num-processes', type=int, default=1)

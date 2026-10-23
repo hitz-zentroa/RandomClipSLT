@@ -10,12 +10,29 @@ from data.dataset_paths import resolve_path
 DATASETS = {
     'how2sign': {'splits': ('train', 'val', 'test'), 'source': 'ase', 'targets': ('en',)},
     'lse_health': {'splits': ('train', 'val', 'test'), 'source': 'ssp', 'targets': ('es',)},
-    'flores_lse': {'splits': ('dev', 'devtest'), 'source': 'ssp', 'targets': ('en', 'es', 'ca', 'eu', 'gl')},
+    'flores_lse': {'splits': ('train', 'val', 'test'), 'native_splits': ('dev', 'devtest'),
+                   'source': 'ssp', 'targets': ('es', 'en', 'ca', 'eu', 'gl')},
 }
+
+SENTENCE_METADATA_FIELDS = (
+    'sentence', 'text_en', 'text_es', 'text_ca', 'text_eu', 'text_gl',
+    'video_id', 'file_name', 'flores_id', 'source_row',
+    'start_time', 'end_time', 'fps', 'width', 'height', 'complete',
+)
+
+
+def sentence_metadata(attrs):
+    """Read supported sentence metadata, ignoring extra attributes in older files."""
+    metadata = {}
+    for key in SENTENCE_METADATA_FIELDS:
+        if key in attrs:
+            value = attrs[key]
+            metadata[key] = value.item() if hasattr(value, 'item') else value
+    return metadata
 
 
 def protocol_name(name, protocol=None):
-    return protocol or ('sd_td' if name == 'lse_health' else 'default')
+    return protocol or {'lse_health': 'sd_td', 'flores_lse': 'zs'}.get(name, 'default')
 
 
 def dataset_options(name, split, target=None):
@@ -37,26 +54,21 @@ def selection_key(name, protocol, split):
 
 
 def load_segments(name, args, config):
-    """Return metadata for a native partition, or all native partitions."""
+    """Return metadata for a selected partition, or all protocols/partitions."""
     module = importlib.import_module(f'data.{name}')
-    if name == 'lse_health':
+    if name in ('lse_health', 'flores_lse'):
         return module.load_segments(args, config)
     if getattr(args, 'split_protocol', None) not in (None, 'default'):
         raise ValueError('Extract native partitions first; add custom protocols with data.set_sentence_splits.')
     parts = DATASETS[name]['splits'] if args.split == 'all' else (args.split,)
     records, provenance = [], {}
-    resolved_revision = None
     for part in parts:
         if part not in DATASETS[name]['splits']:
             raise ValueError(f'Unknown native partition {part}.')
         child = SimpleNamespace(**{**vars(args), 'split': part})
-        child.resolved_revision = resolved_revision
         rows, metadata = module.load_segments(child, config)
-        resolved_revision = metadata.get('revision', resolved_revision)
         for row in rows:
             row['memberships'] = {'default': part}
-            if name == 'flores_lse':
-                row['attrs']['source_provenance_json'] = json.dumps(metadata, sort_keys=True)
         records.extend(rows)
         provenance[part] = metadata
     return records, {'sources_json': json.dumps(provenance, sort_keys=True)}
@@ -133,10 +145,10 @@ def load_sentence_dataset(path, name, split, target=None, protocol=None):
                               'tgt_sentence': group.attrs[reference_key],
                               'height': group.attrs['height'], 'width': group.attrs['width'],
                               'sentence_id': path_in_file})
-            manifest.append({'sentence_id': sentence_id, **{
-                k: v.item() if hasattr(v, 'item') else v for k, v in group.attrs.items()}})
+            manifest.append({'sentence_id': sentence_id, **sentence_metadata(group.attrs)})
     if not instances:
         raise ValueError('Empty partition.')
+    print(f'Dataset {key}: input language={source}, output language={target}')
     return Dataset.from_list(instances), manifest, metadata
 
 

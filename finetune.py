@@ -6,7 +6,7 @@ import yaml
 
 from data.data import T5_NEWLINE_TOKEN, DataCollator
 from data.sentence_datasets import (DATASETS, dataset_path, protocol_name,
-                                    selection_key, load_sentence_dataset)
+                                    selection_key, load_sentence_dataset, sentence_metadata)
 from data.keypoint_processing import get_processed_keypoint_dim
 from eval_utils import compute_bleu_from_predictions, compute_generation_metrics, get_bleu_references
 from model import CustomByT5Model
@@ -29,8 +29,10 @@ def finetune(args, config):
     max_length_config = config['training']['max_lengths']
     target_effective_batch_size = config['training']['finetune_target_effective_batch_size']
     per_device_batch_sizes = config['training']['finetune_per_device_batch_sizes']
-    lr = config['training']['finetune_lr']
-    max_steps = config['training']['finetune_max_steps']
+    lr = float(config['training']['finetune_lr'])
+    finetune_overrides = config['training'].get('finetune_dataset_overrides', {}).get(args.dataset, {})
+    max_steps = finetune_overrides.get('max_steps', config['training']['finetune_max_steps'])
+    eval_steps = finetune_overrides.get('eval_steps', config['training'].get('finetune_eval_steps', 150))
 
     train_ds, train_manifest, train_metadata = load_sentence_dataset(
         h5_path, args.dataset, args.train_split, args.tgt_lang, protocol,
@@ -57,8 +59,15 @@ def finetune(args, config):
     selection_path = os.path.join(run_dir, 'data_selection.json')
     if args.resume:
         with open(selection_path, encoding='utf-8') as file:
-            if json.load(file) != selection:
-                raise ValueError('Resume configuration/data selection differs from the saved run.')
+            saved_selection = json.load(file)
+        # Older manifests included attributes that no longer belong to the format.
+        for part in ('train', 'validation'):
+            saved_selection[part] = [
+                {'sentence_id': row['sentence_id'], **sentence_metadata(row)}
+                for row in saved_selection[part]
+            ]
+        if saved_selection != selection:
+            raise ValueError('Resume configuration/data selection differs from the saved run.')
     elif int(os.environ.get('RANK', 0)) == 0:
         os.makedirs(run_dir, exist_ok=True)
         with open(selection_path, 'x', encoding='utf-8') as file:
@@ -129,7 +138,7 @@ def finetune(args, config):
         run_name=args.run_name,
         seed=seed,
         data_seed=config['training'].get('data_seed', seed),
-        logging_steps=50, # default 500. Kendu?
+        logging_steps=min(50, eval_steps),
         max_steps=max_steps,
         per_device_train_batch_size=per_device_batch_sizes['train'],
         per_device_eval_batch_size=per_device_batch_sizes['eval'],
@@ -140,9 +149,10 @@ def finetune(args, config):
         # max_grad_norm=0,
         # warmup_steps=1000,
         eval_strategy='steps',
+        eval_on_start=True,
         save_strategy='steps',
-        eval_steps=150,
-        save_steps=150,
+        eval_steps=eval_steps,
+        save_steps=eval_steps,
         save_total_limit=2,
         metric_for_best_model='eval_bleu',
         predict_with_generate=True,
@@ -175,7 +185,7 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint-path', type=str, required=True)
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--dataset', default='how2sign', choices=DATASETS)
-    parser.add_argument('--split-protocol')
+    parser.add_argument('--split-protocol', help='FLORES-LSE: zs (default), si, sd; LSE-Health: sd_td (default), sd_ti, si_ti.')
     parser.add_argument('--train-split', default='train')
     parser.add_argument('--val-split', default='val')
     parser.add_argument('--tgt-lang')

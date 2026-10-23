@@ -242,7 +242,7 @@ def main(args, config):
     def create_optimizer():
         return Adafactor(
             model.parameters(),
-            lr=1e-3,
+            lr=float(config['training']['lr']),
             relative_step=False,
             scale_parameter=False
         )
